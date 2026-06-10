@@ -1,0 +1,34 @@
+@import url('https://fonts.googleapis.com/css2?family=National+Park:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: 'National Park', system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #2A2A26;
+  background-color: #F5F4F1;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  width: 100%;
+}
+
+/* Smooth transitions */
+* {
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+
+button, a {
+  transition-property: background-color, color, transform, box-shadow;
+}

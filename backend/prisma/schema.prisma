@@ -1,0 +1,235 @@
+// This is your Prisma schema file
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  passwordHash  String
+  firstName     String?
+  lastName      String?
+  phone         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  properties    Property[]
+  projects      Project[]
+  bidRequests   BidRequest[]
+  
+  @@map("users")
+}
+
+model Property {
+  id            String    @id @default(uuid())
+  userId        String
+  address       String
+  city          String
+  state         String
+  zipCode       String
+  latitude      Float
+  longitude     Float
+  lotSizeAcres  Float?
+  aerialImageUrl String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projects      Project[]
+  
+  @@map("properties")
+}
+
+model Project {
+  id            String    @id @default(uuid())
+  userId        String
+  propertyId    String
+  name          String
+  description   String?
+  status        ProjectStatus @default(DRAFT)
+  budget        Float?
+  preferences   Json      // Store design preferences as JSON
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  property      Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  designs       Design[]
+  bidRequests   BidRequest[]
+  
+  @@map("projects")
+}
+
+enum ProjectStatus {
+  DRAFT
+  GENERATING
+  COMPLETE
+  IN_PROGRESS
+  FINISHED
+}
+
+model Design {
+  id            String    @id @default(uuid())
+  projectId     String
+  name          String
+  imageUrl      String
+  thumbnailUrl  String?
+  description   String?
+  style         String    // Modern, Traditional, Native, Xeriscaping, etc.
+  estimatedCost Float?
+  plantList     Json?     // Array of plants with details
+  materials     Json?     // Materials needed
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  
+  @@map("designs")
+}
+
+model Plant {
+  id                String    @id @default(uuid())
+  commonName        String
+  scientificName    String
+  category          PlantCategory
+  sunRequirement    String    // Full Sun, Partial Shade, Full Shade
+  waterRequirement  String    // Low, Medium, High
+  hardinessZones    String[]
+  matureHeight      String?
+  matureWidth       String?
+  bloomTime         String?
+  description       String?
+  imageUrl          String?
+  createdAt         DateTime  @default(now())
+  
+  nurseryInventory  NurseryInventory[]
+  
+  @@map("plants")
+}
+
+enum PlantCategory {
+  TREE
+  SHRUB
+  PERENNIAL
+  ANNUAL
+  GRASS
+  GROUNDCOVER
+  VINE
+}
+
+model Nursery {
+  id            String    @id @default(uuid())
+  name          String
+  address       String
+  city          String
+  state         String
+  zipCode       String
+  phone         String?
+  website       String?
+  latitude      Float
+  longitude     Float
+  rating        Float?
+  createdAt     DateTime  @default(now())
+  
+  inventory     NurseryInventory[]
+  
+  @@map("nurseries")
+}
+
+model NurseryInventory {
+  id            String    @id @default(uuid())
+  nurseryId     String
+  plantId       String
+  inStock       Boolean   @default(true)
+  price         Float?
+  size          String?   // 1 gallon, 5 gallon, etc.
+  lastUpdated   DateTime  @default(now())
+  
+  nursery       Nursery   @relation(fields: [nurseryId], references: [id], onDelete: Cascade)
+  plant         Plant     @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  
+  @@unique([nurseryId, plantId, size])
+  @@map("nursery_inventory")
+}
+
+model Contractor {
+  id            String    @id @default(uuid())
+  businessName  String
+  contactName   String?
+  email         String    @unique
+  phone         String
+  address       String
+  city          String
+  state         String
+  zipCode       String
+  latitude      Float
+  longitude     Float
+  license       String?
+  insurance     Boolean   @default(false)
+  rating        Float?
+  reviewCount   Int       @default(0)
+  services      String[]  // Array of services offered
+  yearsInBusiness Int?
+  websiteUrl    String?
+  bio           String?
+  createdAt     DateTime  @default(now())
+  
+  bids          Bid[]
+  
+  @@map("contractors")
+}
+
+model BidRequest {
+  id            String    @id @default(uuid())
+  userId        String
+  projectId     String
+  description   String
+  budget        Float?
+  timeline      String?
+  status        BidRequestStatus @default(OPEN)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project       Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  bids          Bid[]
+  
+  @@map("bid_requests")
+}
+
+enum BidRequestStatus {
+  OPEN
+  REVIEWING
+  ACCEPTED
+  CLOSED
+}
+
+model Bid {
+  id            String    @id @default(uuid())
+  bidRequestId  String
+  contractorId  String
+  amount        Float
+  timeline      String
+  description   String
+  status        BidStatus @default(PENDING)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  bidRequest    BidRequest @relation(fields: [bidRequestId], references: [id], onDelete: Cascade)
+  contractor    Contractor @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  
+  @@map("bids")
+}
+
+enum BidStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+}
