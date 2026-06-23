@@ -27,7 +27,7 @@ type PolyStep = 'drawing' | 'attributes';
 
 export interface ConfirmedFeature {
   id: string;
-  type: 'tree' | 'hardscape' | 'structure';
+  type: 'house' | 'tree' | 'hardscape' | 'structure';
   keep: boolean;
   source: 'detected' | 'added';
   vertices: [number, number][];

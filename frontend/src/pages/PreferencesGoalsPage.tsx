@@ -1,10 +1,10 @@
 import { useState, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Leaf, Star, Flower2, Heart, Droplets, Shield, Armchair, UtensilsCrossed, Flame, Waves, Sprout, Package, Sun, TreePine, Upload, X } from 'lucide-react';
+import { Leaf, Star, Flower2, Heart, Droplets, Shield, Armchair, UtensilsCrossed, Flame, Waves, Sprout, Package, Upload, X } from 'lucide-react';
 import Logo from '../components/Logo';
 import AppStepper from '../components/AppStepper';
 
-type Step = 1 | 2 | 3 | 4 | 5;
+type Step = 1 | 2 | 3 | 4 | 5 | 6;
 
 const IT = "'Inter Tight', sans-serif";
 const IS = "'Instrument Serif', serif";
@@ -37,8 +37,12 @@ const ALL_FEATURES = [
   { id: 'water',    label: 'Water feature',    backOnly: false, icon: Waves           },
   { id: 'garden',   label: 'Vegetable garden', backOnly: false, icon: Sprout          },
   { id: 'storage',  label: 'Storage shed',     backOnly: true,  icon: Package         },
-  { id: 'lawn',     label: 'Open lawn',        backOnly: false, icon: Sun             },
-  { id: 'trees',    label: 'Shade trees',      backOnly: false, icon: TreePine        },
+];
+
+const LAWN_OPTIONS = [
+  { id: 'none', label: 'None',    value: 0,    desc: 'Only planted areas and hardscapes'  },
+  { id: 'some', label: 'Some',    value: 0.25, desc: 'A modest open area for pets or kids' },
+  { id: 'lot',  label: 'A lot',   value: 0.50, desc: 'Lawn is a central part of the yard' },
 ];
 
 const QUESTIONS: Record<Step, string> = {
@@ -46,7 +50,8 @@ const QUESTIONS: Record<Step, string> = {
   2: 'What style are you going for?',
   3: 'What are your priorities?',
   4: 'What features would you like?',
-  5: 'Add a photo of your yard',
+  5: 'How much lawn would you like?',
+  6: 'Add a photo of your yard',
 };
 
 function FrontYardIllustration() {
@@ -117,6 +122,7 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
   const [style,            setStyle]            = useState<string>(saved.style || '');
   const [selectedGoals,    setSelectedGoals]    = useState<string[]>(saved.goal_priority || []);
   const [selectedFeatures, setSelectedFeatures] = useState<string[]>(saved.space_usage   || []);
+  const [selectedLawn,     setSelectedLawn]     = useState<string>(LAWN_OPTIONS.find(o => o.value === saved.lawnTarget)?.id ?? '');
   const [photo,            setPhoto]            = useState<string | null>(sc.photo || null);
   const [dragging,         setDragging]         = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -150,13 +156,14 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
     reader.readAsDataURL(file);
   };
 
-  const handleFinish = () => {
+  const handleFinish = (lawnId = selectedLawn) => {
     const validIds = new Set(ALL_FEATURES.filter(f => yardType !== 'front' || !f.backOnly).map(f => f.id));
     localStorage.setItem('userPreferences', JSON.stringify({
       style,
       goal_priority:  selectedGoals,
       not_important:  ALL_GOALS.filter(g => !selectedGoals.includes(g.id)).map(g => g.id),
       space_usage:    selectedFeatures.filter(id => validIds.has(id)),
+      lawnTarget:     LAWN_OPTIONS.find(o => o.id === lawnId)?.value ?? null,
     }));
     const existing = (() => { try { return JSON.parse(localStorage.getItem('siteContext') || '{}'); } catch { return {}; } })();
     localStorage.setItem('siteContext', JSON.stringify({
@@ -167,6 +174,14 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
     navigate(nextPath ?? '/concept-generating');
   };
 
+  const handleLawn = (id: string) => {
+    setSelectedLawn(id);
+    setTimeout(() => {
+      if (skipPhoto) handleFinish(id);
+      else setStep(6 as Step);
+    }, 520);
+  };
+
   const visibleFeatures = ALL_FEATURES.filter(f => yardType !== 'front' || !f.backOnly);
 
   return (
@@ -175,7 +190,7 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
       {/* Header */}
       <div className="flex items-start justify-between px-10 mb-6 flex-shrink-0">
         <Logo />
-        <AppStepper step={step} total={skipPhoto ? 4 : 5} />
+        <AppStepper step={step} total={skipPhoto ? 5 : 6} />
       </div>
 
       {/* Question heading */}
@@ -320,8 +335,39 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
         </div>
       )}
 
-      {/* ── Step 5: Photo upload ──────────────────────────────────── */}
-      {!skipPhoto && step === 5 && (
+      {/* ── Step 5: Lawn ─────────────────────────────────────────── */}
+      {step === 5 && (
+        <div className="mx-auto" style={{ width: '75%' }}>
+          <div className="flex gap-4">
+            {LAWN_OPTIONS.map(opt => {
+              const active = selectedLawn === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  onClick={() => handleLawn(opt.id)}
+                  className="rounded-3xl focus:outline-none transition-all duration-300 hover:-translate-y-1 active:translate-y-0 flex flex-col items-center justify-center gap-2 p-6 flex-1"
+                  style={{
+                    height: '150px',
+                    backgroundColor: active ? '#C8DFC8' : '#F4EAD2',
+                    border: active ? '2px solid #1A1A16' : '1.5px solid rgba(26,26,22,0.18)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span style={{ fontFamily: IS, fontSize: '1.8rem', color: '#2A2A26', fontWeight: 400 }}>
+                    {opt.label}
+                  </span>
+                  <span style={{ fontFamily: IT, fontSize: '0.8rem', color: '#7A7A73' }}>
+                    {opt.desc}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Step 6: Photo upload ──────────────────────────────────── */}
+      {!skipPhoto && step === 6 && (
         <div className="mx-auto flex flex-col items-center gap-6" style={{ width: '75%', maxWidth: '640px' }}>
           <p style={{ fontFamily: IT, fontSize: '0.9rem', color: '#7A7A73', textAlign: 'center', lineHeight: 1.6 }}>
             A photo helps us generate concepts that match your home's architecture. You can skip this if you don't have one handy.
@@ -371,13 +417,16 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
         </button>
       )}
 
-      {/* Continue — fixed bottom-right, steps 3–5 */}
-      {(step === 3 || step === 4 || step === 5) && (() => {
-        const onStep4Next = skipPhoto ? handleFinish : () => setStep(5 as Step);
-        const hasSelection = step === 3 ? selectedGoals.length > 0 : step === 4 ? selectedFeatures.length > 0 : photo !== null;
-        const onClick = step === 3 ? () => setStep(4) : step === 4 ? onStep4Next : handleFinish;
-        const primaryLabel = step === 5 ? 'Generate concepts →' : step === 4 && skipPhoto ? 'Build my plan →' : 'Continue →';
-        const skipLabel    = step === 5 ? 'Skip, generate without photo →' : 'Skip →';
+      {/* Continue — fixed bottom-right, steps 3–4 and 6 */}
+      {(step === 3 || step === 4 || step === 6) && (() => {
+        const hasSelection = step === 3 ? selectedGoals.length > 0
+                           : step === 4 ? selectedFeatures.length > 0
+                           : photo !== null;
+        const onClick = step === 3 ? () => setStep(4)
+                      : step === 4 ? () => setStep(5 as Step)
+                      : () => handleFinish();
+        const primaryLabel = step === 6 ? 'Generate concepts →' : 'Continue →';
+        const skipLabel    = step === 6 ? 'Skip, generate without photo →' : 'Skip →';
         return hasSelection ? (
           <button onClick={onClick}
             className="fixed bottom-8 right-10 flex items-center gap-2.5 px-7 py-3.5 rounded-full transition-all hover:opacity-90"

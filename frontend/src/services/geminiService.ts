@@ -3461,7 +3461,7 @@ CRITICAL RULES:
 // ── Site feature detection (boundary-aware) ───────────────────────────────────
 
 export interface DetectedSiteFeature {
-  type: 'tree' | 'hardscape' | 'structure';
+  type: 'tree' | 'hardscape' | 'structure' | 'house';
   label: string;
   vertices: [number, number][]; // [lng, lat] geographic coordinates
   confidence: number;
@@ -3559,7 +3559,19 @@ export async function detectSiteFeatures(
     imgMaxLat - ny * (imgMaxLat - imgMinLat),
   ];
 
-  // Draw boundary polygon on the image so Gemini has a clear visual reference
+  // Buffer boundary by 10 ft to define the search zone
+  const SEARCH_BUFFER_M = 10 * 0.3048; // 10 ft → metres
+  let searchVerts: [number, number][] = boundaryVerts;
+  try {
+    const buffered = turf.buffer(turf.polygon([[...boundaryVerts, boundaryVerts[0]]]), SEARCH_BUFFER_M, { units: 'meters' });
+    if (buffered) {
+      const ring = buffered.geometry.coordinates[0] as [number, number][];
+      searchVerts = ring[ring.length - 1][0] === ring[0][0] && ring[ring.length - 1][1] === ring[0][1]
+        ? ring.slice(0, -1) : ring;
+    }
+  } catch {}
+
+  // Annotate image: red dashed outline = 10 ft search zone, white line = actual boundary
   const annotatedDataUrl = await new Promise<string>(resolve => {
     const img = new Image();
     img.onload = () => {
@@ -3567,19 +3579,26 @@ export async function detectSiteFeatures(
       canvas.width = img.width; canvas.height = img.height;
       const ctx = canvas.getContext('2d')!;
       ctx.drawImage(img, 0, 0);
-      // Convert boundary lng/lat → image pixels
       const toImgPx = (lng: number, lat: number): [number, number] => [
         (lng - imgMinLng) / (imgMaxLng - imgMinLng) * img.width,
         (imgMaxLat - lat) / (imgMaxLat - imgMinLat) * img.height,
       ];
-      ctx.beginPath();
-      boundaryVerts.forEach(([lng, lat], i) => {
-        const [px, py] = toImgPx(lng, lat);
-        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-      });
-      ctx.closePath();
-      ctx.strokeStyle = '#FF4444'; ctx.lineWidth = 4; ctx.stroke();
+      const tracePath = (verts: [number, number][]) => {
+        ctx.beginPath();
+        verts.forEach(([lng, lat], i) => {
+          const [px, py] = toImgPx(lng, lat);
+          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        });
+        ctx.closePath();
+      };
+      // Red dashed = search zone (10 ft buffer)
+      tracePath(searchVerts);
       ctx.fillStyle = 'rgba(255,68,68,0.08)'; ctx.fill();
+      ctx.setLineDash([8, 5]); ctx.strokeStyle = '#FF4444'; ctx.lineWidth = 3; ctx.stroke();
+      ctx.setLineDash([]);
+      // White solid = actual yard boundary
+      tracePath(boundaryVerts);
+      ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2; ctx.stroke();
       const out = canvas.toDataURL('image/jpeg', 0.92);
       console.log('%c annotated', `font-size:1px;padding:150px;background:url(${out}) center/contain no-repeat`);
       resolve(out);
@@ -3590,18 +3609,20 @@ export async function detectSiteFeatures(
 
   const prompt =
     `You are analyzing a satellite aerial photograph of a residential yard.\n` +
-    `The yard boundary is outlined in RED on the image.\n\n` +
-    `Identify ALL existing features INSIDE the red boundary that a landscape designer must work around. Detect:\n` +
+    `The WHITE line shows the exact yard boundary. The RED DASHED line extends 10 feet beyond it — this is your search zone.\n\n` +
+    `Identify ALL existing features INSIDE the red dashed search zone that a landscape designer must work around. Detect:\n` +
+    `  - "house": The primary house or residence building. Trace its roof/footprint outline. There should be at most one.\n` +
     `  - "tree": Individual trees or large shrubs with a visible canopy from above.\n` +
     `  - "hardscape": Any paved or impervious surface — driveway, walkway, path, patio, pool, deck, concrete, gravel.\n` +
-    `  - "structure": Any built structure — shed, detached garage, fence line, retaining wall, pergola. Do NOT include the primary house/residence.\n\n` +
+    `  - "structure": Any secondary built structure — shed, detached garage, fence line, retaining wall, pergola.\n\n` +
     `For each feature, trace a polygon around its footprint:\n` +
+    `  - House: 4–12 vertices tracing the building roofline/footprint as precisely as possible.\n` +
     `  - Trees: 8–12 vertices forming a circle around the canopy edge.\n` +
     `  - Hardscape / structures: 4–16 vertices tracing the actual shape.\n\n` +
     `Coordinates: (0,0) = top-left of image, (1,1) = bottom-right. Use normalized floats.\n\n` +
     `Return ONLY a JSON array — no markdown fences, no extra text:\n` +
-    `[{"type":"tree"|"hardscape"|"structure","label":"brief label","polygon":[[x,y],...],"confidence":0.0-1.0}]\n\n` +
-    `If nothing is detected inside the red boundary, return: []`;
+    `[{"type":"house"|"tree"|"hardscape"|"structure","label":"brief label","polygon":[[x,y],...],"confidence":0.0-1.0}]\n\n` +
+    `If nothing is detected inside the red dashed zone, return: []`;
 
   const { mimeType, base64 } = parseDataUrl(annotatedDataUrl);
 
@@ -3635,7 +3656,7 @@ export async function detectSiteFeatures(
       return [];
     }
 
-    const VALID = new Set(['tree', 'hardscape', 'structure']);
+    const VALID = new Set(['house', 'tree', 'hardscape', 'structure']);
     const raw = JSON.parse(match[0]) as any[];
     console.log('[detectSiteFeatures] raw polygons (norm coords):', raw.map((f: any) => ({ type: f.type, label: f.label, first: f.polygon?.[0] })));
     const mapped: DetectedSiteFeature[] = raw
@@ -3647,10 +3668,10 @@ export async function detectSiteFeatures(
         confidence: typeof f.confidence === 'number' ? Math.min(1, Math.max(0, f.confidence)) : 0.7,
       }));
 
-    // Keep only features whose centroid falls within boundary + 5ft (1.524m) buffer
+    // Keep only features whose centroid falls within the 10ft search zone
     try {
       const boundaryPoly = turf.polygon([[...boundaryVerts, boundaryVerts[0]]]);
-      const buffered = turf.buffer(boundaryPoly, 1.524, { units: 'meters' });
+      const buffered = turf.buffer(boundaryPoly, SEARCH_BUFFER_M, { units: 'meters' });
       if (buffered) {
         const filtered = mapped.filter(f => {
           if (f.vertices.length < 3) return false;
