@@ -6,8 +6,16 @@ const GEMINI_API_KEY    = import.meta.env.VITE_GEMINI_API_KEY || '';
 const GOOGLE_MAPS_KEY   = import.meta.env.VITE_GOOGLE_MAPS_KEY || '';
 const IMAGE_MODEL = 'gemini-2.5-flash-image';
 const TEXT_MODEL  = 'gemini-2.0-flash';
-const IMAGE_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${IMAGE_MODEL}:generateContent`;
-const TEXT_API_URL  = `https://generativelanguage.googleapis.com/v1beta/models/${TEXT_MODEL}:generateContent`;
+
+// Gemini routing: in production the API key lives only on the server, so calls
+// go through the Netlify Function proxy. In local dev, a VITE_GEMINI_API_KEY in
+// .env makes calls go straight to Google so `vite dev` works without netlify dev.
+const geminiUrl = (model: string) =>
+  GEMINI_API_KEY
+    ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
+    : `/.netlify/functions/gemini?model=${model}`;
+const IMAGE_API_URL = geminiUrl(IMAGE_MODEL);
+const TEXT_API_URL  = geminiUrl(TEXT_MODEL);
 
 const STYLE_LABELS: Record<string, string> = {
   natural_wild: 'Whimsical / wildflower cottage style',
@@ -3495,7 +3503,9 @@ function worldPxToLngLat(px: number, py: number, zoom: number): [number, number]
 export async function detectSiteFeatures(
   boundaryVerts: [number, number][],
 ): Promise<DetectedSiteFeature[]> {
-  if (boundaryVerts.length < 3 || !GEMINI_API_KEY || !GOOGLE_MAPS_KEY) return [];
+  // Gemini is reached via the proxy when no client key is set, so only the
+  // Google Maps key (which is needed to fetch the satellite tile) is required.
+  if (boundaryVerts.length < 3 || !GOOGLE_MAPS_KEY) return [];
 
   const lngs = boundaryVerts.map(v => v[0]);
   const lats  = boundaryVerts.map(v => v[1]);
@@ -3626,7 +3636,7 @@ export async function detectSiteFeatures(
 
   const { mimeType, base64 } = parseDataUrl(annotatedDataUrl);
 
-  const VISION_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent';
+  const VISION_URL = geminiUrl('gemini-3.5-flash');
 
   try {
     const res = await fetch(VISION_URL, {

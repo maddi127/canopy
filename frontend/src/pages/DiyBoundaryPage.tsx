@@ -7,8 +7,6 @@ import { detectSiteFeatures } from '../services/geminiService';
 import type { ConfirmedFeature } from './DiyFeatureConfirmPage';
 
 const GOOGLE_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY || '';
-const GEMINI_API_KEY  = import.meta.env.VITE_GEMINI_API_KEY  || '';
-const GEMINI_MODEL    = 'gemini-2.5-flash';
 const IT = "'Inter Tight', sans-serif";
 const IS = "'Instrument Serif', serif";
 

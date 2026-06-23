@@ -168,7 +168,13 @@ export function deterministicPalette(
 // ── LLM curation ──────────────────────────────────────────────────────────
 
 const GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
-const TEXT_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`;
+// Direct to Google in dev (key present), else via the server-side proxy.
+const TEXT_URL = GEMINI_KEY
+  ? `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`
+  : `/.netlify/functions/gemini?model=gemini-2.0-flash`;
+// Gemini is reachable in prod (via proxy) or in dev when a key is set;
+// otherwise fall back to the deterministic palette below.
+const GEMINI_AVAILABLE = Boolean(GEMINI_KEY) || import.meta.env.PROD;
 
 export async function curatePalettes(params: {
   zones: ZoneInput[];
@@ -182,7 +188,7 @@ export async function curatePalettes(params: {
   const { zones, allPlants, usdaZone, style, priorities, includes, excludes } = params;
 
   if (zones.length === 0) return [];
-  if (!GEMINI_KEY) {
+  if (!GEMINI_AVAILABLE) {
     return deterministicPalette(zones, allPlants, usdaZone, style, includes, excludes);
   }
 
