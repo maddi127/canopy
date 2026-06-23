@@ -5,6 +5,9 @@
 
 [build.environment]
   NODE_VERSION = "20"
+  # These VITE_* vars are inlined into the client bundle by design (it's a
+  # static SPA). Tell Netlify's secret scanner not to flag them as leaked.
+  SECRETS_SCAN_OMIT_KEYS = "VITE_GEMINI_API_KEY,VITE_GOOGLE_MAPS_KEY,VITE_MAPBOX_TOKEN,VITE_SUPABASE_URL,VITE_SUPABASE_ANON_KEY"
 
 # SPA fallback so client-side routes (/diy/*) resolve on direct load / refresh
 [[redirects]]
