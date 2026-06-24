@@ -3,7 +3,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import { AuthProvider } from './context/AuthContext';
 import RequireAuth from './components/RequireAuth';
-import SaveProjectButton from './components/SaveProjectButton';
 import AuthPage from './pages/AuthPage';
 import MyProjectsPage from './pages/MyProjectsPage';
 
@@ -60,7 +59,6 @@ function App() {
                 <Route path="/diy/plan"            element={<DiyPlanPage />} />
               </Route>
             </Routes>
-            <SaveProjectButton />
           </div>
         </Router>
       </AuthProvider>

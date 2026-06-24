@@ -1,5 +1,6 @@
 import { useState, useRef, useMemo, useCallback, useEffect, Fragment } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useSaveAndExit } from '../hooks/useSaveAndExit';
 import { GoogleMap, useJsApiLoader, Marker, Polygon, Polyline, OverlayView } from '@react-google-maps/api';
 import * as turf from '@turf/turf';
 import Logo from '../components/Logo';
@@ -86,19 +87,20 @@ function buildCoordSystem(verts: [number, number][]) {
 }
 
 type StepId    = 'boundary' | 'identify' | 'add_existing' | 'door';
-type AddMode   = 'tree' | 'hardscape' | 'structure' | 'house' | 'paving' | 'garden_bed' | 'utility' | null;
+type AddMode   = 'tree' | 'hardscape' | 'structure' | 'house' | 'paving' | 'garden_bed' | 'utility' | 'walkway' | 'other' | null;
 type ETreeStep = 'placing' | 'sizing';
 type EPolyStep = 'drawing' | 'attributes';
 
 const STEP_TITLE: Record<StepId, string> = {
   boundary:     'Draw area',
-  identify:     'Confirm existing',
+  identify:     'Mark existing features',
   add_existing: 'Add existing',
   door:         'Mark your door',
 };
 
 export default function DiyBoundaryPage() {
   const navigate = useNavigate();
+  const saveAndExit = useSaveAndExit();
   const mapRef   = useRef<google.maps.Map | null>(null);
 
   const { isLoaded } = useJsApiLoader({ id: 'google-map-script', googleMapsApiKey: GOOGLE_MAPS_KEY });
@@ -106,7 +108,7 @@ export default function DiyBoundaryPage() {
   const sc = useMemo<any>(() => { try { return JSON.parse(localStorage.getItem('siteContext') || '{}'); } catch { return {}; } }, []);
   const center: [number, number] = [sc.lng ?? -104.99, sc.lat ?? 39.74];
 
-  const visibleSteps: StepId[] = ['boundary', 'identify', 'add_existing', 'door'];
+  const visibleSteps: StepId[] = ['boundary', 'identify', 'door'];
 
   // ── Boundary ─────────────────────────────────────────────────────────────────
   const isDblClickRef = useRef(false);
@@ -118,6 +120,19 @@ export default function DiyBoundaryPage() {
   });
   const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
   const [mousePos,   setMousePos]   = useState<[number, number] | null>(null);
+
+  // Live refs so map event listeners never act on a stale boundary.
+  const verticesRef = useRef(vertices); verticesRef.current = vertices;
+  const drawingRef  = useRef(drawing);  drawingRef.current  = drawing;
+  // Latest-closure refs for the natively-attached map dblclick listener.
+  const handleBoundaryDoneRef = useRef<(() => void) | null>(null);
+  const dblHandlerRef = useRef<((e: google.maps.MapMouseEvent) => void) | null>(null);
+
+  // Persist the boundary (points → lines) on every change, including edits.
+  useEffect(() => {
+    const bd = (() => { try { return JSON.parse(localStorage.getItem('diyBoundary') || 'null') ?? {}; } catch { return {}; } })();
+    localStorage.setItem('diyBoundary', JSON.stringify({ ...bd, ring: vertices }));
+  }, [vertices]);
 
   const boundaryDone = vertices.length >= 3 && !drawing;
 
@@ -131,14 +146,24 @@ export default function DiyBoundaryPage() {
     try { return Math.round(turf.length(turf.lineString([...vertices, vertices[0]]), { units: 'feet' })); } catch { return 0; }
   }, [vertices]);
 
+  // Per-edge length labels (rounded feet), at each segment midpoint.
+  const segmentLabels = useMemo(() => {
+    if (vertices.length < 2) return [] as { mid: [number, number]; ft: number }[];
+    const pts = boundaryDone ? [...vertices, vertices[0]] : vertices;
+    const out: { mid: [number, number]; ft: number }[] = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      let ft = 0;
+      try { ft = Math.round(turf.length(turf.lineString([a, b]), { units: 'feet' })); } catch {}
+      if (ft > 0) out.push({ mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], ft });
+    }
+    return out;
+  }, [vertices, boundaryDone]);
+
   // ── Accordion step ───────────────────────────────────────────────────────────
-  const [openStep, setOpenStep] = useState<StepId | null>(() => {
-    try {
-      const bd = JSON.parse(localStorage.getItem('diyBoundary') || 'null');
-      if ((bd?.ring?.length ?? 0) >= 3) return null;
-    } catch {}
-    return 'boundary';
-  });
+  const [openStep, setOpenStep] = useState<StepId | null>('boundary');
+  // Bumped on Re-draw to remount the map and clear any stale overlays.
+  const [mapEpoch, setMapEpoch] = useState(0);
 
   // ── Confirmed features ───────────────────────────────────────────────────────
   const [features, setFeatures] = useState<ConfirmedFeature[]>(() => {
@@ -153,24 +178,30 @@ export default function DiyBoundaryPage() {
   useEffect(() => { localStorage.setItem('diyConfirmedFeatures', JSON.stringify(features)); }, [features]);
 
   const reviewQueue  = useMemo(() => features.filter(f => f.source === 'detected'), [features]);
-  const [queueIdx, setQueueIdx] = useState(() => {
-    const saved = parseInt(localStorage.getItem('diyQueueIdx') ?? '0', 10);
-    return isNaN(saved) ? 0 : saved;
+  const [decidedIds, setDecidedIds] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('diyDecidedFeatures') || '[]'); } catch { return []; }
   });
-  useEffect(() => { localStorage.setItem('diyQueueIdx', String(queueIdx)); }, [queueIdx]);
-  const currentReview = reviewQueue[queueIdx] ?? null;
-  const identifyDone  = reviewQueue.length === 0 || queueIdx >= reviewQueue.length;
+  useEffect(() => { localStorage.setItem('diyDecidedFeatures', JSON.stringify(decidedIds)); }, [decidedIds]);
+  const decidedSet      = useMemo(() => new Set(decidedIds), [decidedIds]);
+  const liveFeatures    = useMemo(() => features.filter(f => f.keep !== false), [features]);
+  const deletedFeatures = useMemo(() => features.filter(f => f.keep === false), [features]);
+  const reviewedCount   = reviewQueue.filter(f => decidedSet.has(f.id)).length;
+  const identifyDone    = reviewQueue.every(f => decidedSet.has(f.id));
 
+  // The active detected feature is the one editable on the map.
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [showDeleted, setShowDeleted] = useState(false);
+  const currentReview = features.find(f => f.id === activeId) ?? null;
+
+  // Auto-advance the active feature to the next un-decided, non-deleted one.
   useEffect(() => {
-    if (openStep !== 'identify' || !currentReview || !mapRef.current) return;
-    try {
-      const bb = turf.bbox(turf.polygon([[...currentReview.vertices, currentReview.vertices[0]]]));
-      const featureBounds = new google.maps.LatLngBounds({ lat: bb[1], lng: bb[0] }, { lat: bb[3], lng: bb[2] });
-      const mapBounds = mapRef.current.getBounds();
-      if (mapBounds && mapBounds.contains(featureBounds.getNorthEast()) && mapBounds.contains(featureBounds.getSouthWest())) return;
-      mapRef.current.fitBounds(featureBounds, 140);
-    } catch {}
-  }, [queueIdx, openStep]); // eslint-disable-line react-hooks/exhaustive-deps
+    const stillValid = activeId && liveFeatures.some(f => f.id === activeId && !decidedSet.has(f.id));
+    if (!stillValid) {
+      const next = liveFeatures.find(f => !decidedSet.has(f.id));
+      setActiveId(next ? next.id : null);
+    }
+  }, [activeId, liveFeatures, decidedSet]);
+
 
   const [doorPoint, setDoorPoint] = useState<[number, number] | null>(() => {
     try { return JSON.parse(localStorage.getItem('diyDoorPoint') || 'null'); } catch { return null; }
@@ -180,7 +211,8 @@ export default function DiyBoundaryPage() {
     else localStorage.removeItem('diyDoorPoint');
   }, [doorPoint]);
 
-  const advanceFromFeatures = useCallback(() => { setOpenStep('add_existing'); }, []);
+  // Continue only once the area is drawn, every feature is confirmed/deleted, and the door is marked.
+  const canContinue = boundaryDone && identifyDone && doorPoint !== null;
 
   const resolveFeature = useCallback((id: string, decision: 'keep' | 'remove' | 'not_real') => {
     setFeatures(prev =>
@@ -188,15 +220,25 @@ export default function DiyBoundaryPage() {
         ? prev.filter(f => f.id !== id)
         : prev.map(f => f.id === id ? { ...f, keep: decision === 'keep' } : f),
     );
-    setQueueIdx(i => {
-      const next = i + 1;
-      if (next >= reviewQueue.length) { advanceFromFeatures(); return next; }
-      return next;
-    });
-  }, [reviewQueue.length, advanceFromFeatures]);
+    if (decision === 'not_real') setDecidedIds(prev => prev.filter(x => x !== id));
+    else setDecidedIds(prev => prev.includes(id) ? prev : [...prev, id]);
+  }, []);
+
+  // Bring an X'd-out feature back into the list as confirmed.
+  const restoreFeature = useCallback((id: string) => {
+    setFeatures(prev => prev.map(f => f.id === id ? { ...f, keep: true } : f));
+    setDecidedIds(prev => prev.includes(id) ? prev : [...prev, id]);
+  }, []);
+
+  // Re-open a confirmed feature for editing.
+  const reactivateFeature = useCallback((id: string) => {
+    setDecidedIds(prev => prev.filter(x => x !== id));
+    setActiveId(id);
+  }, []);
 
   // ── Add-existing ─────────────────────────────────────────────────────────────
   const [addMode,         setAddMode]         = useState<AddMode>(null);
+  const [addPickerOpen,   setAddPickerOpen]   = useState(false);
   const [eTreeStep,       setETreeStep]       = useState<ETreeStep>('placing');
   const [eTreeCenter,     setETreeCenter]     = useState<[number, number] | null>(null);
   const [eTreeRadiusKm,   setETreeRadiusKm]   = useState(0);
@@ -219,32 +261,40 @@ export default function DiyBoundaryPage() {
     if (!eTreeCenter || r < 0.0005) return;
     const ring = (turf.circle(eTreeCenter, r, { steps: 48, units: 'kilometers' })
       .geometry.coordinates[0] as [number, number][]).slice(0, -1);
+    const id = `feat_${Date.now()}`;
     setFeatures(prev => [...prev, {
-      id: `feat_${Date.now()}`, type: 'tree' as const, keep: true, source: 'added' as const,
+      id, type: 'tree' as const, keep: true, source: 'added' as const,
       vertices: ring, label: 'Tree', attributes: {},
     }]);
+    setDecidedIds(prev => [...prev, id]);
     cancelAdd();
   }, [eTreeCenter, eTreeRadiusKm, cancelAdd]);
 
   const confirmAddHardscape = useCallback(() => {
     if (ePolyVerts.length < 3 || !eSurface) return;
+    const id = `feat_${Date.now()}`;
     setFeatures(prev => [...prev, {
-      id: `feat_${Date.now()}`, type: 'hardscape' as const, keep: true, source: 'added' as const,
+      id, type: 'hardscape' as const, keep: true, source: 'added' as const,
       vertices: ePolyVerts, label: `Hardscape — ${eSurface}`, attributes: { surfaceType: eSurface },
     }]);
+    setDecidedIds(prev => [...prev, id]);
     cancelAdd();
   }, [ePolyVerts, eSurface, cancelAdd]);
 
   const confirmAddStructure = useCallback(() => {
     if (ePolyVerts.length < 3) return;
+    const id = `feat_${Date.now()}`;
     setFeatures(prev => [...prev, {
-      id: `feat_${Date.now()}`, type: 'structure' as const, keep: true, source: 'added' as const,
-      vertices: ePolyVerts, label: eStructureLabel.trim() || 'Structure', attributes: {},
+      id, type: 'structure' as const, keep: true, source: 'added' as const,
+      vertices: ePolyVerts, label: eStructureLabel.trim() || 'Other', attributes: {},
     }]);
+    setDecidedIds(prev => [...prev, id]);
     cancelAdd();
   }, [ePolyVerts, eStructureLabel, cancelAdd]);
 
   const SIMPLE_POLY_CONFIG: Record<string, { type: ConfirmedFeature['type']; label: string }> = {
+    structure:  { type: 'structure', label: 'Structure' },
+    walkway:    { type: 'hardscape', label: 'Walkway'   },
     house:      { type: 'house',     label: 'House'      },
     paving:     { type: 'hardscape', label: 'Paving'     },
     garden_bed: { type: 'hardscape', label: 'Garden bed' },
@@ -254,10 +304,12 @@ export default function DiyBoundaryPage() {
   const confirmAddSimplePoly = useCallback(() => {
     if (ePolyVerts.length < 3 || !addMode || !(addMode in SIMPLE_POLY_CONFIG)) return;
     const cfg = SIMPLE_POLY_CONFIG[addMode];
+    const id = `feat_${Date.now()}`;
     setFeatures(prev => [...prev, {
-      id: `feat_${Date.now()}`, type: cfg.type, keep: true, source: 'added' as const,
+      id, type: cfg.type, keep: true, source: 'added' as const,
       vertices: ePolyVerts, label: cfg.label, attributes: {},
     }]);
+    setDecidedIds(prev => [...prev, id]);
     cancelAdd();
   }, [ePolyVerts, addMode, cancelAdd]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -318,8 +370,8 @@ export default function DiyBoundaryPage() {
 
   // ── Confirmed-feature GeoJSON ────────────────────────────────────────────────
   const pendingIds = useMemo(
-    () => new Set(reviewQueue.slice(queueIdx + 1).map(f => f.id)),
-    [reviewQueue, queueIdx],
+    () => new Set(reviewQueue.filter(f => !decidedSet.has(f.id)).map(f => f.id)),
+    [reviewQueue, decidedSet],
   );
   const activeConfirmedId = currentReview?.id ?? null;
 
@@ -332,17 +384,17 @@ export default function DiyBoundaryPage() {
 
   const cfPendingGeoJSON = useMemo(() => ({
     type: 'FeatureCollection' as const,
-    features: reviewQueue.slice(queueIdx + 1).filter(f => f.vertices.length >= 3)
+    features: reviewQueue.filter(f => !decidedSet.has(f.id) && f.id !== activeId && f.keep !== false && f.vertices.length >= 3)
       .map(f => ({ type: 'Feature' as const, properties: { id: f.id }, geometry: { type: 'Polygon' as const, coordinates: [[...f.vertices, f.vertices[0]]] } })),
-  }), [reviewQueue, queueIdx]);
+  }), [reviewQueue, decidedSet, activeId]);
 
   const cfActiveGeoJSON = useMemo(() => {
-    if (!currentReview || currentReview.vertices.length < 3) return null;
+    if (!currentReview || currentReview.keep === false || currentReview.vertices.length < 3) return null;
     return { type: 'Feature' as const, properties: {}, geometry: { type: 'Polygon' as const, coordinates: [[...currentReview.vertices, currentReview.vertices[0]]] } };
   }, [currentReview]);
 
   const eTreePreviewCoords = useMemo<[number, number][] | null>(() => {
-    if (addMode !== 'tree' || openStep !== 'add_existing') return null;
+    if (addMode !== 'tree' || openStep !== 'identify') return null;
     let rKm = 0;
     if (eTreeStep === 'sizing' && eTreeCenter && mousePos)
       rKm = turf.distance(turf.point(eTreeCenter), turf.point(mousePos), { units: 'kilometers' });
@@ -377,33 +429,30 @@ export default function DiyBoundaryPage() {
   const handleMapClick = useCallback((e: google.maps.MapMouseEvent) => {
     if (draggingIdx !== null || !e.latLng) return;
     const lng = e.latLng.lng(), lat = e.latLng.lat();
-    setTimeout(() => {
-      if (isDblClickRef.current) return;
-      if (drawing) { setVertices(v => [...v, [lng, lat]]); return; }
-      if (openStep === 'door') { setDoorPoint([lng, lat]); return; }
-      if (openStep === 'add_existing') {
-        if (addMode === 'tree') {
-          if (eTreeStep === 'placing')                        { setETreeCenter([lng, lat]); setETreeStep('sizing'); }
-          else if (eTreeStep === 'sizing' && eTreeCenter) {
-            const r = turf.distance(turf.point(eTreeCenter), turf.point([lng, lat]), { units: 'kilometers' });
-            if (r >= 0.0005) confirmAddTree(r);
-          }
-        } else if (isPolyAddMode && ePolyStep === 'drawing') {
-          setEPolyVerts(v => [...v, [lng, lat]]);
+    if (drawing) { setVertices(v => [...v, [lng, lat]]); return; }
+    if (openStep === 'door') { setDoorPoint([lng, lat]); return; }
+    if (openStep === 'identify') {
+      if (addMode === 'tree') {
+        if (eTreeStep === 'placing')                        { setETreeCenter([lng, lat]); setETreeStep('sizing'); }
+        else if (eTreeStep === 'sizing' && eTreeCenter) {
+          const r = turf.distance(turf.point(eTreeCenter), turf.point([lng, lat]), { units: 'kilometers' });
+          if (r >= 0.0005) confirmAddTree(r);
         }
+      } else if (isPolyAddMode && ePolyStep === 'drawing') {
+        setEPolyVerts(v => [...v, [lng, lat]]);
       }
-    }, 0);
+    }
   }, [drawing, draggingIdx, openStep, addMode, isPolyAddMode, eTreeStep, eTreeCenter, ePolyStep, confirmAddTree]);
 
   const handleBoundaryDone = useCallback(() => {
-    if (!drawing || vertices.length < 3) return;
+    if (!drawingRef.current || verticesRef.current.length < 3) return;
     setDrawing(false);
-    const snap = vertices;
+    const snap = verticesRef.current;
     const bd = (() => { try { return JSON.parse(localStorage.getItem('diyBoundary') || 'null') ?? {}; } catch { return {}; } })();
     localStorage.setItem('diyBoundary', JSON.stringify({ ...bd, ring: snap }));
     const gen = ++detectGenRef.current;
     setDetecting(true);
-    setFeatures([]); setQueueIdx(0); localStorage.setItem('diyQueueIdx', '0');
+    setFeatures([]); setDecidedIds([]);
     detectSiteFeatures(snap)
       .then(detected => {
         if (detectGenRef.current !== gen) return;
@@ -419,43 +468,69 @@ export default function DiyBoundaryPage() {
         }));
         const boundaryPoly = turf.polygon([[...snap, snap[0]]]);
         const boundaryRing = turf.lineString([...snap, snap[0]]);
-        const newFeats = allFeats.filter(f => {
-          if (f.vertices.length < 3) return false;
+        const newFeats = allFeats.flatMap<ConfirmedFeature>(f => {
+          if (f.vertices.length < 3) return [];
           try {
             const featPoly = turf.polygon([[...f.vertices, f.vertices[0]]]);
-            if (f.type === 'tree') {
-              if (turf.booleanIntersects(boundaryPoly, featPoly)) return true;
+            // Trees (full canopy) and houses (full footprint) are not clipped; keep if inside or near the edge.
+            if (f.type === 'tree' || f.type === 'house') {
+              if (turf.booleanIntersects(boundaryPoly, featPoly)) return [f];
               const center = turf.centroid(featPoly).geometry.coordinates as [number, number];
               const nearest = turf.nearestPointOnLine(boundaryRing, turf.point(center));
-              return turf.distance(turf.point(center), nearest, { units: 'feet' }) <= 10;
+              return turf.distance(turf.point(center), nearest, { units: 'feet' }) <= 10 ? [f] : [];
             }
-            return turf.booleanIntersects(boundaryPoly, featPoly);
-          } catch { return true; }
+            // Everything else: clip to only the portion inside the boundary.
+            const clipped = turf.intersect(featPoly, boundaryPoly);
+            if (!clipped) return [];
+            const geom = clipped.geometry;
+            const outerRings: number[][][] =
+              geom.type === 'Polygon'      ? [geom.coordinates[0] as number[][]]
+            : geom.type === 'MultiPolygon' ? (geom.coordinates as number[][][][]).map(p => p[0])
+            : [];
+            return outerRings
+              .map(r => (r as [number, number][]).slice(0, -1))
+              .filter(r => r.length >= 3)
+              .map((r, i) => ({ ...f, id: i === 0 ? f.id : `${f.id}_${i}`, vertices: r }));
+          } catch { return [f]; }
         });
         localStorage.setItem('diyDetectedFeatures', JSON.stringify(newFeats));
         setFeatures(newFeats);
-        setQueueIdx(0);
+        setDecidedIds([]);
       })
       .catch(() => {})
       .finally(() => { setDetecting(false); if (detectGenRef.current === gen) setOpenStep('identify'); });
-  }, [drawing, vertices]);
-
-  const handleDblClick = useCallback((e: google.maps.MapMouseEvent) => {
-    isDblClickRef.current = true;
-    setTimeout(() => { isDblClickRef.current = false; }, 0);
-    e.stop?.();
-    if (openStep === 'add_existing' && isPolyAddMode && ePolyStep === 'drawing' && ePolyVerts.length >= 3) {
-      if (addMode === 'hardscape' || addMode === 'structure') {
-        setEPolyStep('attributes');
-      } else {
-        confirmAddSimplePoly();
-      }
+  }, []);
+  handleBoundaryDoneRef.current = handleBoundaryDone;
+  dblHandlerRef.current = (e: google.maps.MapMouseEvent) => {
+    if (!e.latLng) return;
+    const lng = e.latLng.lng(), lat = e.latLng.lat();
+    // Finish an added feature polygon.
+    if (openStep === 'identify' && isPolyAddMode && ePolyStep === 'drawing' && ePolyVerts.length >= 3) {
+      if (addMode === 'other') setEPolyStep('attributes');
+      else confirmAddSimplePoly();
+      return;
     }
-  }, [openStep, isPolyAddMode, addMode, ePolyStep, ePolyVerts, confirmAddSimplePoly]);
+    // Insert a movable vertex on the active feature's edge.
+    if (openStep === 'identify' && addMode === null && currentReview && currentReview.type !== 'tree' && currentReview.vertices.length >= 3) {
+      try {
+        const ring = [...currentReview.vertices, currentReview.vertices[0]];
+        const snapped = turf.nearestPointOnLine(turf.lineString(ring), turf.point([lng, lat]), { units: 'feet' });
+        if ((snapped.properties.dist ?? 999) <= 20) {
+          const insertAt = (snapped.properties.index ?? 0) + 1;
+          const pt = snapped.geometry.coordinates as [number, number];
+          updateCurrentFeature(f => {
+            const verts = [...f.vertices];
+            verts.splice(Math.min(insertAt, verts.length), 0, pt);
+            return { ...f, vertices: verts };
+          });
+        }
+      } catch {}
+    }
+  };
 
   const handleMouseMove = useCallback((e: google.maps.MapMouseEvent) => {
     if (!e.latLng) return;
-    if (drawing || (openStep === 'add_existing' && addMode !== null))
+    if (drawing || (openStep === 'identify' && addMode !== null))
       setMousePos([e.latLng.lng(), e.latLng.lat()]);
   }, [drawing, openStep, addMode]);
 
@@ -464,46 +539,43 @@ export default function DiyBoundaryPage() {
     setDetecting(false);
     setVertices([]); setDrawing(true); setMousePos(null);
     setOpenStep('boundary');
-    setFeatures([]); setQueueIdx(0); cancelAdd();
+    setFeatures([]); setDecidedIds([]); setActiveId(null); cancelAdd();
+    setMapEpoch(e => e + 1);
     localStorage.setItem('diyBoundary', JSON.stringify({ ring: [] }));
     localStorage.setItem('diyConfirmedFeatures', '[]');
     localStorage.setItem('diyDetectedFeatures', '[]');
-    localStorage.setItem('diyQueueIdx', '0');
+    localStorage.setItem('diyDecidedFeatures', '[]');
     localStorage.removeItem('diyIdentifyDone');
     localStorage.removeItem('diyLayout');
     localStorage.removeItem('diyDoorPoint');
     setDoorPoint(null);
   };
 
-  const mapCursor = (drawing || openStep === 'door' || (openStep === 'add_existing' && addMode !== null)) ? 'crosshair' : undefined;
+  const mapCursor = (drawing || openStep === 'door' || (openStep === 'identify' && addMode !== null)) ? 'crosshair' : undefined;
 
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
-    <div className="h-screen flex flex-col" style={{ backgroundColor: '#E7E1D5', overflow: 'hidden' }}>
+    <div className="h-screen flex flex-col pt-8" style={{ backgroundColor: '#E7E1D5', overflow: 'hidden' }}>
 
-      <div className="flex items-center justify-between px-10 py-4 flex-shrink-0">
+      <div className="flex items-start justify-between px-10 mb-6 flex-shrink-0">
         <Logo />
-        <button onClick={() => navigate('/')}
+        <button onClick={saveAndExit}
           style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
           Save & exit ↗
         </button>
       </div>
 
-      <div className="flex flex-1 overflow-hidden pr-10 gap-5" style={{ paddingBottom: '1.25rem' }}>
+      <div className="flex-shrink-0" style={{ paddingLeft: '8rem', marginTop: '2rem', marginBottom: '3.5rem' }}>
+        <h1 style={{ fontFamily: IS, fontSize: '4rem', color: '#2A2A26', lineHeight: 1.05, margin: 0, fontWeight: 400 }}>Define your project area</h1>
+      </div>
 
-        {/* ── Left panel ── */}
-        <div className="flex flex-col flex-shrink-0" style={{ width: '33%', background: '#EFE9DA', overflow: 'hidden', borderRight: '1px solid rgba(42,42,38,0.1)' }}>
+      <div className="flex flex-1 overflow-hidden pr-32 gap-5 items-start" style={{ paddingBottom: '1.25rem', paddingLeft: '8rem' }}>
+
+        {/* ── Left panel (floating toolbar) ── */}
+        <div className="flex flex-col flex-shrink-0" style={{ width: '33%', height: '81%', background: '#EFE9DA', overflow: 'hidden', borderRadius: '1rem', boxShadow: '0 12px 48px rgba(0,0,0,0.12)' }}>
 
           {/* Scrollable section */}
           <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-
-            {/* Heading */}
-            <div style={{ padding: '1.5rem 1.25rem 0' }}>
-              <h1 style={{ fontFamily: IS, fontSize: '2.4rem', color: '#2A2A26', lineHeight: 1.05, margin: 0, fontWeight: 400 }}>Build your plan.</h1>
-              <p style={{ fontFamily: IT, fontSize: '0.85rem', color: '#6A6A60', marginTop: '0.35rem' }}>
-                Map your area step by step — boundary first, then confirm what's there.
-              </p>
-            </div>
 
             {/* Accordion */}
             <div style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
@@ -549,7 +621,7 @@ export default function DiyBoundaryPage() {
                       )}
                       {isIdentify && reviewQueue.length > 0 && (
                         <span style={{ fontFamily: IT, fontSize: '0.75rem', color: '#9A9A92', marginLeft: 2 }}>
-                          — {Math.min(queueIdx, reviewQueue.length)} of {reviewQueue.length}
+                          — {reviewedCount} of {reviewQueue.length}
                         </span>
                       )}
                       {isAddExist && addedExisting.length > 0 && (
@@ -567,32 +639,31 @@ export default function DiyBoundaryPage() {
                     {isBoundary && isOpen && (
                       <div className="px-5 pb-4" style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
                         {boundaryDone ? (
-                          <div className="flex flex-col gap-3 pt-3">
-                            {/* Stats card */}
-                            <div className="rounded-xl p-3 flex gap-6" style={{ background: 'rgba(42,42,38,0.06)' }}>
-                              <div className="flex flex-col gap-0.5">
-                                <span style={{ fontFamily: IT, fontSize: '0.63rem', color: '#9A9A92', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Area</span>
-                                <span style={{ fontFamily: IS, fontSize: '1.35rem', color: '#2A2A26', lineHeight: 1.1 }}>{areaSqFt.toLocaleString()}</span>
-                                <span style={{ fontFamily: IT, fontSize: '0.66rem', color: '#9A9A92' }}>sq ft</span>
+                          <div className="flex items-center justify-between gap-3 pt-3">
+                            {/* Stats card (compact) */}
+                            <div className="rounded-xl px-3 py-2 flex gap-5" style={{ background: 'rgba(42,42,38,0.06)' }}>
+                              <div className="flex flex-col">
+                                <span style={{ fontFamily: IT, fontSize: '0.6rem', color: '#9A9A92', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Area</span>
+                                <span style={{ fontFamily: IS, fontSize: '1.05rem', color: '#2A2A26', lineHeight: 1.15 }}>{areaSqFt.toLocaleString()}<span style={{ fontFamily: IT, fontSize: '0.62rem', color: '#9A9A92', marginLeft: 3 }}>sq ft</span></span>
                               </div>
                               {perimeterFt > 0 && (
-                                <div className="flex flex-col gap-0.5">
-                                  <span style={{ fontFamily: IT, fontSize: '0.63rem', color: '#9A9A92', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Perimeter</span>
-                                  <span style={{ fontFamily: IS, fontSize: '1.35rem', color: '#2A2A26', lineHeight: 1.1 }}>{perimeterFt.toLocaleString()}</span>
-                                  <span style={{ fontFamily: IT, fontSize: '0.66rem', color: '#9A9A92' }}>ft</span>
+                                <div className="flex flex-col">
+                                  <span style={{ fontFamily: IT, fontSize: '0.6rem', color: '#9A9A92', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Perimeter</span>
+                                  <span style={{ fontFamily: IS, fontSize: '1.05rem', color: '#2A2A26', lineHeight: 1.15 }}>{perimeterFt.toLocaleString()}<span style={{ fontFamily: IT, fontSize: '0.62rem', color: '#9A9A92', marginLeft: 3 }}>ft</span></span>
                                 </div>
                               )}
                             </div>
                             <button onClick={resetBoundary}
-                              style={{ fontFamily: IT, fontSize: '0.76rem', color: '#9A9A92', background: 'none', border: 'none', cursor: 'pointer', padding: 0, textAlign: 'left' }}>
-                              Re-draw boundary
+                              className="px-4 py-2 rounded-full hover:opacity-80 transition-all flex-shrink-0"
+                              style={{ border: '1.5px solid rgba(42,42,38,0.2)', background: 'none', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, color: '#2A2A26', cursor: 'pointer' }}>
+                              Re-draw
                             </button>
                           </div>
                         ) : (
                           <div className="flex items-center justify-between pt-3">
                             <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#9A9A92', lineHeight: 1.5 }}>
                               {drawing
-                                ? vertices.length < 3 ? `${3 - vertices.length} more points needed` : 'Click "Done" to close'
+                                ? vertices.length < 3 ? `${3 - vertices.length} more points needed` : 'Click “Done” to close'
                                 : vertices.length === 0 ? 'Click corners on the map' : 'Drag corners to adjust'}
                             </span>
                             <div className="flex items-center gap-2 flex-shrink-0">
@@ -626,60 +697,72 @@ export default function DiyBoundaryPage() {
                     {/* Identify step */}
                     {isIdentify && isOpen && boundaryDone && (
                       <div className="flex flex-col gap-3 px-5 pb-4" style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
-                        {reviewQueue.length === 0 ? (
-                          <div className="flex flex-col gap-3 pt-3">
-                            <p style={{ fontFamily: IT, fontSize: '0.82rem', color: '#9A9A92', margin: 0 }}>No features detected automatically.</p>
-                            <button onClick={advanceFromFeatures}
-                              className="rounded-full py-2.5 hover:opacity-90 transition-all"
-                              style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-                              Continue →
-                            </button>
-                          </div>
-                        ) : identifyDone ? (
-                          <div className="flex flex-col gap-3 pt-3">
-                            <p style={{ fontFamily: IT, fontSize: '0.82rem', color: '#9A9A92', margin: 0 }}>
-                              All {reviewQueue.length} feature{reviewQueue.length !== 1 ? 's' : ''} reviewed.
-                            </p>
-                            <button onClick={advanceFromFeatures}
-                              className="rounded-full py-2.5 hover:opacity-90 transition-all"
-                              style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-                              Continue →
-                            </button>
-                          </div>
-                        ) : currentReview ? (
-                          <div className="flex flex-col gap-3 pt-3">
-                            <p style={{ fontFamily: IT, fontSize: '0.82rem', color: '#9A9A92', margin: 0, lineHeight: 1.5 }}>
-                              We auto-detected {reviewQueue.length} thing{reviewQueue.length !== 1 ? 's' : ''}. Confirm or dismiss each.
-                            </p>
-                            {/* Feature card */}
-                            <div className="flex items-center gap-3 rounded-2xl p-3" style={{ background: 'white' }}>
-                              <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, background: FEATURE_COLOR[currentReview.type] ?? '#9A9A92' }} />
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontFamily: IT, fontSize: '0.88rem', color: '#2A2A26', fontWeight: 600 }}>
-                                  {currentReview.label || (currentReview.type.charAt(0).toUpperCase() + currentReview.type.slice(1))}
+                        {(liveFeatures.length > 0 || deletedFeatures.length > 0) && (
+                          <>
+                            {reviewQueue.length > 0 && (
+                              <p style={{ fontFamily: IT, fontSize: '0.82rem', color: '#9A9A92', margin: 0, lineHeight: 1.5 }}>
+                                We auto-detected {reviewQueue.length} existing feature{reviewQueue.length !== 1 ? 's' : ''} in your project area. Confirm, edit, or delete each feature.
+                              </p>
+                            )}
+                            {liveFeatures.map(f => {
+                              const isActive  = f.id === activeId;
+                              const confirmed = decidedSet.has(f.id);
+                              return (
+                                <div key={f.id} onClick={() => reactivateFeature(f.id)}
+                                  className="flex items-center gap-3 rounded-2xl p-3 transition-all"
+                                  style={{ background: 'white', cursor: 'pointer',
+                                    opacity: confirmed && !isActive ? 0.5 : 1,
+                                    outline: isActive ? '2px solid #2F6B4F' : '1.5px solid transparent',
+                                    boxShadow: isActive ? '0 0 0 3px rgba(47,107,79,0.15)' : 'none' }}>
+                                  <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, background: FEATURE_COLOR[f.type] ?? '#9A9A92' }} />
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontFamily: IT, fontSize: '0.88rem', color: '#2A2A26', fontWeight: 600 }}>
+                                      {f.label || (f.type.charAt(0).toUpperCase() + f.type.slice(1))}
+                                    </div>
+                                  </div>
+                                  <div className="flex gap-1.5" onClick={e => e.stopPropagation()}>
+                                    <button onClick={() => resolveFeature(f.id, 'keep')}
+                                      className="flex items-center justify-center rounded-xl hover:opacity-80 transition-all"
+                                      style={{ width: 40, height: 40, cursor: 'pointer', fontSize: '1rem', fontWeight: 700,
+                                        background: confirmed ? '#2F6B4F' : 'rgba(42,42,38,0.06)',
+                                        border: confirmed ? 'none' : '1.5px solid rgba(42,42,38,0.12)',
+                                        color: confirmed ? 'white' : '#2F6B4F' }}>
+                                      ✓
+                                    </button>
+                                    <button onClick={() => resolveFeature(f.id, 'remove')}
+                                      className="flex items-center justify-center rounded-xl hover:opacity-80 transition-all"
+                                      style={{ width: 40, height: 40, cursor: 'pointer', fontSize: '0.9rem',
+                                        background: 'rgba(42,42,38,0.06)', border: '1.5px solid rgba(42,42,38,0.12)', color: '#9A9A92' }}>
+                                      ✕
+                                    </button>
+                                  </div>
                                 </div>
-                                {(() => {
-                                  const dims = getFeatureDimsFt(currentReview.vertices);
-                                  return dims ? (
-                                    <div style={{ fontFamily: IT, fontSize: '0.73rem', color: '#9A9A92' }}>{dims.w} × {dims.h} ft</div>
-                                  ) : null;
-                                })()}
-                              </div>
-                              <div className="flex gap-1.5">
-                                <button onClick={() => resolveFeature(currentReview.id, 'keep')}
-                                  className="flex items-center justify-center rounded-xl hover:opacity-80 transition-all"
-                                  style={{ width: 40, height: 40, background: 'rgba(42,42,38,0.06)', border: '1.5px solid rgba(42,42,38,0.12)', cursor: 'pointer', color: '#2F6B4F', fontSize: '1rem', fontWeight: 700 }}>
-                                  ✓
+                              );
+                            })}
+
+                            {deletedFeatures.length > 0 && (
+                              <div className="flex flex-col gap-1.5">
+                                <button onClick={() => setShowDeleted(s => !s)}
+                                  style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0', fontFamily: IT, fontSize: '0.75rem', color: '#9A9A92', fontWeight: 500 }}>
+                                  <span>{showDeleted ? '▾' : '▸'}</span>
+                                  Deleted features ({deletedFeatures.length})
                                 </button>
-                                <button onClick={() => resolveFeature(currentReview.id, currentReview.type === 'house' ? 'not_real' : 'remove')}
-                                  className="flex items-center justify-center rounded-xl hover:opacity-80 transition-all"
-                                  style={{ width: 40, height: 40, background: 'rgba(42,42,38,0.06)', border: '1.5px solid rgba(42,42,38,0.12)', cursor: 'pointer', color: '#9A9A92', fontSize: '0.9rem' }}>
-                                  ✕
-                                </button>
+                                {showDeleted && deletedFeatures.map(f => (
+                                  <div key={f.id} className="flex items-center gap-3 rounded-xl px-3 py-2" style={{ background: 'rgba(42,42,38,0.04)' }}>
+                                    <div style={{ width: 18, height: 18, borderRadius: 4, flexShrink: 0, opacity: 0.5, background: FEATURE_COLOR[f.type] ?? '#9A9A92' }} />
+                                    <span style={{ flex: 1, minWidth: 0, fontFamily: IT, fontSize: '0.8rem', color: '#9A9A92', textDecoration: 'line-through', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {f.label || (f.type.charAt(0).toUpperCase() + f.type.slice(1))}
+                                    </span>
+                                    <button onClick={() => restoreFeature(f.id)}
+                                      style={{ flexShrink: 0, background: 'none', border: '1.5px solid rgba(42,42,38,0.2)', borderRadius: 100, padding: '3px 10px', cursor: 'pointer', fontFamily: IT, fontSize: '0.72rem', fontWeight: 500, color: '#2A2A26' }}>
+                                      Restore
+                                    </button>
+                                  </div>
+                                ))}
                               </div>
-                            </div>
-                          </div>
-                        ) : null}
+                            )}
+                          </>
+                        )}
                       </div>
                     )}
 
@@ -687,9 +770,9 @@ export default function DiyBoundaryPage() {
                     {isDoor && isOpen && boundaryDone && (
                       <div className="flex flex-col gap-3 px-5 pb-4" style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
                         <p className="pt-3" style={{ fontFamily: IT, fontSize: '0.82rem', color: '#9A9A92', margin: 0, lineHeight: 1.5 }}>
-                          Click on the map to mark where your main door opens into the yard. We'll route paths from here.
+                          Click on the map to mark your {sc?.yard_type === 'back' ? 'back' : sc?.yard_type === 'front' ? 'front' : 'front/back'} door. If you have multiple doors, mark the one you use most frequently.
                         </p>
-                        {doorPoint ? (
+                        {doorPoint && (
                           <div className="flex flex-col gap-2">
                             <div className="flex items-center gap-2 rounded-xl px-3 py-2" style={{ background: 'rgba(42,42,38,0.06)' }}>
                               <span style={{ fontSize: '0.9rem' }}>🚪</span>
@@ -699,48 +782,44 @@ export default function DiyBoundaryPage() {
                             </div>
                             <span style={{ fontFamily: IT, fontSize: '0.71rem', color: '#9A9A92' }}>Click again on the map to reposition.</span>
                           </div>
-                        ) : (
-                          <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#9A9A92' }}>Click anywhere on the map to place the door.</span>
                         )}
                       </div>
                     )}
 
-                    {/* Add-existing step */}
-                    {isAddExist && isOpen && boundaryDone && (
-                      <div className="flex flex-col gap-3 px-5 pb-4" style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
+                    {/* Add-more step (shown once detected features are marked) */}
+                    {isIdentify && isOpen && boundaryDone && identifyDone && (
+                      <div className="flex flex-col gap-3 px-5 pb-4" style={{ borderTop: reviewQueue.length > 0 ? '1px solid rgba(42,42,38,0.08)' : 'none' }}>
                         {addMode === null ? (
                           <div className="flex flex-col gap-3 pt-3">
-                            <p style={{ fontFamily: IT, fontSize: '0.82rem', color: '#9A9A92', margin: 0, lineHeight: 1.5 }}>
-                              Missed something? Pick a type, then tap the map to drop it.
-                            </p>
-                            <div className="flex flex-wrap gap-2">
-                              {([
-                                { mode: 'tree'       as const, label: 'Tree',        color: '#5C8A5C' },
-                                { mode: 'structure'  as const, label: 'Structure',   color: '#9A8B78' },
-                                { mode: 'house'      as const, label: 'House',       color: '#C4935A' },
-                                { mode: 'paving'     as const, label: 'Paving',      color: '#B5A48B' },
-                                { mode: 'garden_bed' as const, label: 'Garden bed',  color: '#C4A06A' },
-                                { mode: 'utility'    as const, label: 'Utility',     color: '#6B93A8' },
-                              ]).map(({ mode, label, color }) => (
-                                <button key={mode} onClick={() => startAdd(mode)}
-                                  className="flex items-center gap-2 px-3 py-2 rounded-xl hover:opacity-80 transition-all"
-                                  style={{ background: 'rgba(255,255,255,0.7)', border: '1.5px solid rgba(42,42,38,0.12)', cursor: 'pointer' }}>
-                                  <div style={{ width: 14, height: 14, borderRadius: 3, background: color, flexShrink: 0 }} />
-                                  <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#2A2A26', fontWeight: 500 }}>{label}</span>
-                                </button>
-                              ))}
-                            </div>
-                            {addedExisting.length > 0 && (
-                              <div className="flex flex-col gap-1.5">
-                                <span style={{ fontFamily: IT, fontSize: '0.68rem', color: '#B0B0A6', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Added</span>
-                                {addedExisting.map(f => (
-                                  <div key={f.id} className="flex items-center gap-2 rounded-xl px-3 py-2" style={{ background: 'rgba(42,42,38,0.06)' }}>
-                                    <div style={{ width: 8, height: 8, borderRadius: 2, background: f.type === 'tree' ? '#2F6B4F' : '#C77C5B', flexShrink: 0 }} />
-                                    <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.label}</span>
-                                    <button onClick={() => setFeatures(prev => prev.filter(x => x.id !== f.id))}
-                                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0 }}>✕</button>
-                                  </div>
-                                ))}
+                            {!addPickerOpen ? (
+                              <button onClick={() => setAddPickerOpen(true)}
+                                className="flex items-center justify-between gap-2 rounded-xl px-3 py-2.5 hover:opacity-80 transition-all"
+                                style={{ width: '100%', background: 'rgba(42,42,38,0.04)', border: '1.5px dashed rgba(42,42,38,0.18)', cursor: 'pointer' }}>
+                                <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500 }}>Something missing? Add another feature</span>
+                                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 22, height: 22, borderRadius: '50%', background: '#2A2A26', color: '#efe9db', fontSize: '1rem', lineHeight: 1, flexShrink: 0 }}>+</span>
+                              </button>
+                            ) : (
+                              <div className="flex flex-col gap-2">
+                                <div className="flex items-center justify-between">
+                                  <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#9A9A92', fontWeight: 500 }}>What did we miss?</span>
+                                  <button onClick={() => setAddPickerOpen(false)}
+                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0 }}>✕</button>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  {([
+                                    { mode: 'tree'      as const, label: 'Tree',      color: '#5C8A5C' },
+                                    { mode: 'structure' as const, label: 'Structure', color: '#9A8B78' },
+                                    { mode: 'walkway'   as const, label: 'Walkway',   color: '#B5A48B' },
+                                    { mode: 'other'     as const, label: 'Other',     color: '#9A9A92' },
+                                  ]).map(({ mode, label, color }) => (
+                                    <button key={label} onClick={() => { startAdd(mode); setAddPickerOpen(false); }}
+                                      className="flex items-center gap-2 px-3 py-2 rounded-xl hover:opacity-80 transition-all"
+                                      style={{ background: 'rgba(255,255,255,0.7)', border: '1.5px solid rgba(42,42,38,0.12)', cursor: 'pointer' }}>
+                                      <div style={{ width: 14, height: 14, borderRadius: 3, background: color, flexShrink: 0 }} />
+                                      <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#2A2A26', fontWeight: 500 }}>{label}</span>
+                                    </button>
+                                  ))}
+                                </div>
                               </div>
                             )}
                           </div>
@@ -765,13 +844,13 @@ export default function DiyBoundaryPage() {
                               Confirm hardscape →
                             </button>
                           </div>
-                        ) : addMode === 'structure' && ePolyStep === 'attributes' ? (
+                        ) : addMode === 'other' && ePolyStep === 'attributes' ? (
                           <div className="flex flex-col gap-3 pt-3">
                             <div className="flex items-center justify-between">
                               <span style={{ fontFamily: IT, fontSize: '0.85rem', color: '#2A2A26', fontWeight: 500 }}>What is it?</span>
                               <button onClick={cancelAdd} style={{ fontFamily: IT, fontSize: '0.72rem', color: '#B0B0A6', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>✕ cancel</button>
                             </div>
-                            <input autoFocus type="text" placeholder="Shed, fence, garage…" value={eStructureLabel}
+                            <input autoFocus type="text" placeholder="Patio, pond, fence…" value={eStructureLabel}
                               onChange={e => setEStructureLabel(e.target.value)}
                               onKeyDown={e => { if (e.key === 'Enter') confirmAddStructure(); }}
                               className="rounded-xl px-3 py-2"
@@ -779,7 +858,7 @@ export default function DiyBoundaryPage() {
                             <button onClick={confirmAddStructure}
                               className="rounded-full py-2.5 hover:opacity-90 transition-all"
                               style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-                              Confirm structure →
+                              Add feature →
                             </button>
                           </div>
                         ) : (
@@ -791,7 +870,7 @@ export default function DiyBoundaryPage() {
                                     : 'Click again to set the canopy size.'
                                   : ePolyVerts.length === 0 ? 'Click to start the outline.'
                                   : ePolyVerts.length < 3 ? `${3 - ePolyVerts.length} more point${3 - ePolyVerts.length !== 1 ? 's' : ''} needed.`
-                                  : 'Double-click to close.'}
+                                  : 'Add corners, then tap Finish.'}
                               </span>
                               <button onClick={cancelAdd} style={{ fontFamily: IT, fontSize: '0.72rem', color: '#B0B0A6', background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 }}>✕</button>
                             </div>
@@ -799,6 +878,13 @@ export default function DiyBoundaryPage() {
                               <button onClick={() => setEPolyVerts(v => v.slice(0, -1))}
                                 style={{ fontFamily: IT, fontSize: '0.72rem', color: '#9A9A92', background: 'none', border: 'none', cursor: 'pointer', padding: 0, alignSelf: 'flex-start' }}>
                                 Undo last point
+                              </button>
+                            )}
+                            {isPolyAddMode && ePolyVerts.length >= 3 && (
+                              <button onClick={() => { if (addMode === 'other') setEPolyStep('attributes'); else confirmAddSimplePoly(); }}
+                                className="rounded-full py-2.5 hover:opacity-90 transition-all"
+                                style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
+                                Finish shape →
                               </button>
                             )}
                           </div>
@@ -811,25 +897,14 @@ export default function DiyBoundaryPage() {
             </div>
           </div>
 
-          {/* Footer: back + continue */}
-          <div className="flex items-center gap-3" style={{ borderTop: '1px solid rgba(42,42,38,0.1)', padding: '1rem 1.25rem', flexShrink: 0 }}>
-            <button onClick={() => navigate('/diy/preferences', { state: { step: 5 } })}
-              style={{ fontFamily: IT, fontSize: '0.85rem', color: '#7A7A73', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer', padding: '0.4rem 0', whiteSpace: 'nowrap' }}>
-              ← back
-            </button>
-            <button onClick={goToPlacement} disabled={vertices.length < 3}
-              className="flex-1 rounded-full hover:opacity-90 transition-all disabled:opacity-40"
-              style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: vertices.length >= 3 ? 'pointer' : 'default', padding: '12px 0' }}>
-              Continue to design →
-            </button>
-          </div>
         </div>
 
         {/* ── Right: map ── */}
-        <div className="flex-1 overflow-hidden flex items-center">
-          <div className="w-full rounded-2xl overflow-hidden relative" style={{ cursor: mapCursor, height: '82%', boxShadow: '0 12px 48px rgba(0,0,0,0.22)' }}>
+        <div className="flex-1 overflow-hidden" style={{ height: '81%' }}>
+          <div className="w-full h-full rounded-2xl overflow-hidden relative" style={{ cursor: mapCursor, boxShadow: '0 12px 48px rgba(0,0,0,0.22)' }}>
             {isLoaded ? (
               <GoogleMap
+                key={mapEpoch}
                 mapContainerStyle={{ width: '100%', height: '100%' }}
                 center={{ lat: center[1], lng: center[0] }}
                 zoom={20}
@@ -844,23 +919,32 @@ export default function DiyBoundaryPage() {
                   clickableIcons: false,
                 }}
                 onClick={handleMapClick}
-                onDblClick={handleDblClick}
                 onMouseMove={handleMouseMove}
-                onLoad={map => { mapRef.current = map; }}
+                onLoad={map => { mapRef.current = map; map.addListener('dblclick', (ev: google.maps.MapMouseEvent) => dblHandlerRef.current?.(ev)); }}
               >
                 {/* Boundary polygon */}
                 {vertices.length >= 3 && (
                   <Polygon
                     paths={[...vertices, vertices[0]].map(v => ({ lat: v[1], lng: v[0] }))}
-                    options={{ fillColor: '#2F6B4F', fillOpacity: 0.12, strokeColor: '#FFFFFF', strokeWeight: 2, strokeOpacity: 1, clickable: false }}
+                    options={{ fillColor: '#2F6B4F', fillOpacity: 0.06, strokeColor: '#2F6B4F', strokeWeight: 2.5, strokeOpacity: 1, clickable: false }}
                   />
                 )}
+
+                {/* Segment footage labels */}
+                {segmentLabels.map((s, i) => (
+                  <OverlayView key={`seg-${i}`} position={{ lat: s.mid[1], lng: s.mid[0] }} mapPaneName={OverlayView.OVERLAY_LAYER}
+                    getPixelPositionOffset={(w, h) => ({ x: -(w ?? 0) / 2, y: -(h ?? 0) / 2 })}>
+                    <div style={{ color: '#FFFFFF', fontFamily: IT, fontSize: '0.72rem', fontWeight: 700, whiteSpace: 'nowrap', textShadow: '1px 1px 0 #2F6B4F, -1px 1px 0 #2F6B4F, 1px -1px 0 #2F6B4F, -1px -1px 0 #2F6B4F, 0 0 2px #2F6B4F' }}>
+                      {s.ft} ft
+                    </div>
+                  </OverlayView>
+                ))}
 
                 {/* Boundary draw preview */}
                 {drawing && mousePos && vertices.length > 0 && (
                   <Polyline
                     path={[...vertices, mousePos].map(v => ({ lat: v[1], lng: v[0] }))}
-                    options={{ ...dashedLine('#FFFFFF'), clickable: false }}
+                    options={{ ...dashedLine('#2F6B4F'), clickable: false }}
                   />
                 )}
 
@@ -894,7 +978,7 @@ export default function DiyBoundaryPage() {
                     </Fragment>
                   )}
                   {/* Edit handles */}
-                  {openStep === 'identify' && currentReview && activeFeatureCenter && (<>
+                  {openStep === 'identify' && currentReview && currentReview.keep !== false && activeFeatureCenter && (<>
                     <Marker position={{ lat: activeFeatureCenter[1], lng: activeFeatureCenter[0] }} draggable
                       icon={{ path: google.maps.SymbolPath.CIRCLE, scale: 9, fillColor: 'white', fillOpacity: 1, strokeColor: '#F5C518', strokeWeight: 2.5 }}
                       onDragStart={(e: google.maps.MapMouseEvent) => { editCenterRef.current = { origCenter: [e.latLng!.lng(), e.latLng!.lat()], origVerts: [...currentReview.vertices] }; }}
@@ -907,7 +991,7 @@ export default function DiyBoundaryPage() {
                         onDrag={handleEdgeDrag} onDragEnd={() => {}}
                       />
                     )}
-                    {(currentReview.type === 'house' || currentReview.type === 'hardscape' || currentReview.type === 'structure') &&
+                    {currentReview.type !== 'tree' &&
                       currentReview.vertices.map((v, i) => (
                         <Marker key={`evh-${currentReview.id}-${i}`} position={{ lat: v[1], lng: v[0] }} draggable
                           icon={{ path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: 'white', fillOpacity: 1, strokeColor: '#F5C518', strokeWeight: 2 }}
@@ -919,7 +1003,7 @@ export default function DiyBoundaryPage() {
                     }
                   </>)}
                   {/* Add-existing previews */}
-                  {openStep === 'add_existing' && (<>
+                  {openStep === 'identify' && (<>
                     {eTreePreviewCoords && (<>
                       <Polygon paths={eTreePreviewCoords.map(v => ({ lat: v[1], lng: v[0] }))}
                         options={{ fillColor: '#2F6B4F', fillOpacity: 0.2, strokeOpacity: 0, clickable: false }} />
@@ -974,18 +1058,30 @@ export default function DiyBoundaryPage() {
               <div style={{ width: '100%', height: '100%', background: '#2A2A26' }} />
             )}
 
-            {/* Done button */}
+            {/* Done — closes the project area (shown while drawing with 3+ points) */}
             {drawing && vertices.length >= 3 && (
-              <button
-                onClick={handleBoundaryDone}
+              <button onClick={handleBoundaryDone}
                 className="absolute flex items-center gap-2 px-5 py-2.5 rounded-full hover:opacity-90 transition-all"
-                style={{ bottom: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 10, background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer', boxShadow: '0 4px 16px rgba(0,0,0,0.35)' }}>
-                Done ✓
+                style={{ top: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 10, background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer', boxShadow: '0 4px 16px rgba(0,0,0,0.35)' }}>
+                Done
               </button>
             )}
+
           </div>
         </div>
       </div>
+
+      {/* Fixed nav — matches the preferences page placement */}
+      <button onClick={() => navigate('/diy/preferences', { state: { step: 5 } })}
+        className="fixed bottom-8 left-10 transition-all hover:opacity-70"
+        style={{ color: '#7A7A73', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
+        ← back
+      </button>
+      <button onClick={goToPlacement} disabled={!canContinue}
+        className="fixed bottom-8 right-10 flex items-center gap-2.5 px-7 py-3.5 rounded-full transition-all hover:opacity-90 disabled:opacity-40"
+        style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500, border: 'none', cursor: canContinue ? 'pointer' : 'default' }}>
+        Continue →
+      </button>
 
       {/* Detecting overlay */}
       {detecting && (

@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useSaveAndExit } from '../hooks/useSaveAndExit';
 import Logo from '../components/Logo';
 import { PLANTS, type Plant } from '../features/planting/plantDatabase';
 
@@ -80,6 +81,7 @@ function priorityBadge(priority: string): string {
 
 export default function DiyPlanPage() {
   const navigate = useNavigate();
+  const saveAndExit = useSaveAndExit();
 
   // Load all persisted state
   const conceptImage = localStorage.getItem('diyFinalConcept') || localStorage.getItem('generatedConcept') || '';
@@ -145,7 +147,7 @@ export default function DiyPlanPage() {
       <div className="flex items-center justify-between px-10 py-4 flex-shrink-0 no-print">
         <Logo />
         <button
-          onClick={() => navigate('/')}
+          onClick={saveAndExit}
           style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}
         >
           Save & exit ↗
@@ -153,7 +155,7 @@ export default function DiyPlanPage() {
       </div>
 
       {/* Title */}
-      <div className="px-10 mb-5 flex-shrink-0 no-print">
+      <div className="px-10 mt-8 mb-5 flex-shrink-0 no-print">
         <h1 style={{ fontFamily: IS, fontSize: '3rem', color: '#2A2A26', lineHeight: 1.05, margin: 0, fontWeight: 400 }}>
           Your Canopy plan.
         </h1>

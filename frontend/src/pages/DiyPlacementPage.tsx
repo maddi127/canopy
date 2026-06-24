@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useSaveAndExit } from '../hooks/useSaveAndExit';
 import { GoogleMap, useJsApiLoader, Polygon } from '@react-google-maps/api';
 import Logo from '../components/Logo';
 import type { ConfirmedFeature } from './DiyFeatureConfirmPage';
@@ -265,6 +266,7 @@ function organicPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, rx: 
 // ── Component ──────────────────────────────────────────────────────────────────
 export default function DiyPlacementPage() {
   const navigate = useNavigate();
+  const saveAndExit = useSaveAndExit();
 
   // ── Data ────────────────────────────────────────────────────────────────────
   const saved = useMemo(() => { try { return JSON.parse(localStorage.getItem('diyBoundaryFinal') || '{}'); } catch { return {}; } }, []);
@@ -1020,29 +1022,33 @@ export default function DiyPlacementPage() {
 
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
-    <div className="h-screen flex flex-col" style={{ backgroundColor: '#E7E1D5', overflow: 'hidden' }}>
+    <div className="h-screen flex flex-col pt-8" style={{ backgroundColor: '#E7E1D5', overflow: 'hidden' }}>
 
       {/* Header */}
-      <div className="flex items-center justify-between px-10 py-4 flex-shrink-0">
+      <div className="flex items-start justify-between px-10 mb-6 flex-shrink-0">
         <Logo />
-        <button onClick={() => navigate('/')}
+        <button onClick={saveAndExit}
           style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
           Save & exit ↗
         </button>
       </div>
 
-      <div className="flex flex-1 overflow-hidden pr-10 gap-5" style={{ paddingBottom: '1.25rem' }}>
+      <div className="flex-shrink-0" style={{ paddingLeft: '8rem', marginTop: '2rem', marginBottom: '3.5rem' }}>
+        <h1 style={{ fontFamily: IS, fontSize: '4rem', color: '#2A2A26', lineHeight: 1.05, margin: 0, fontWeight: 400 }}>Design your yard.</h1>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden pr-32 gap-5 items-start" style={{ paddingBottom: '1.25rem', paddingLeft: '8rem' }}>
 
         {/* ── Left sidebar ── */}
-        <div className="flex flex-col flex-shrink-0" style={{ width: '33%', background: '#EFE9DA', overflow: 'hidden', borderRight: '1px solid rgba(42,42,38,0.1)' }}>
+        <div className="flex flex-col flex-shrink-0" style={{ width: '33%', height: '81%', background: '#EFE9DA', overflow: 'hidden', borderRadius: '1rem', boxShadow: '0 12px 48px rgba(0,0,0,0.12)' }}>
 
           <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
 
-            {/* Heading */}
-            <div style={{ padding: '1.5rem 1.25rem 0' }}>
-              <h1 style={{ fontFamily: IS, fontSize: '2.4rem', color: '#2A2A26', lineHeight: 1.05, margin: 0, fontWeight: 400 }}>Design your yard.</h1>
-              <p style={{ fontFamily: IT, fontSize: '0.85rem', color: '#6A6A60', marginTop: '0.35rem' }}>
-                Drag each feature onto the map, then set your boundaries and preferences.
+            {/* Toolbar title */}
+            <div style={{ padding: '1.25rem 1.25rem 0' }}>
+              <h2 style={{ fontFamily: IS, fontSize: '1.5rem', color: '#2A2A26', lineHeight: 1.1, margin: 0, fontWeight: 400 }}>Place your features</h2>
+              <p style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', marginTop: '0.35rem' }}>
+                Drag each feature onto the map, then fine-tune its size and spot.
               </p>
             </div>
 
@@ -1596,25 +1602,13 @@ export default function DiyPlacementPage() {
             </div>
           </div>
 
-          {/* Footer */}
-          <div className="flex items-center gap-3" style={{ borderTop: '1px solid rgba(42,42,38,0.1)', padding: '1rem 1.25rem', flexShrink: 0 }}>
-            <button onClick={() => navigate('/diy/boundary')}
-              style={{ fontFamily: IT, fontSize: '0.85rem', color: '#7A7A73', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer', padding: '0.4rem 0', whiteSpace: 'nowrap' }}>
-              ← back
-            </button>
-            <button onClick={() => navigate('/diy/plan')}
-              className="flex-1 rounded-full hover:opacity-90 transition-all"
-              style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer', padding: '12px 0' }}>
-              Continue to plants →
-            </button>
-          </div>
         </div>
 
         {/* ── Right: canvas over satellite map ── */}
-        <div className="flex-1 overflow-hidden flex items-center">
-          <div className="w-full rounded-2xl overflow-hidden relative"
+        <div className="flex-1 overflow-hidden" style={{ height: '81%' }}>
+          <div className="w-full h-full rounded-2xl overflow-hidden relative"
             ref={containerRef}
-            style={{ height: '82%', boxShadow: '0 12px 48px rgba(0,0,0,0.22)', background: '#1a1a1a' }}>
+            style={{ boxShadow: '0 12px 48px rgba(0,0,0,0.22)', background: '#1a1a1a' }}>
 
             {isLoaded && (
               <GoogleMap
@@ -1861,6 +1855,18 @@ export default function DiyPlacementPage() {
           </div>
         </div>
       </div>
+
+      {/* Fixed nav — matches the preferences page placement */}
+      <button onClick={() => navigate('/diy/boundary')}
+        className="fixed bottom-8 left-10 transition-all hover:opacity-70"
+        style={{ color: '#7A7A73', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
+        ← back
+      </button>
+      <button onClick={() => navigate('/diy/plan')}
+        className="fixed bottom-8 right-10 flex items-center gap-2.5 px-7 py-3.5 rounded-full transition-all hover:opacity-90"
+        style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
+        Continue to plants →
+      </button>
     </div>
   );
 }
