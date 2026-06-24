@@ -43,9 +43,9 @@ function App() {
               <Route path="/preferences" element={<PreferencesGoalsPage nextPath="/diy/boundary" skipPhoto />} />
               <Route path="/payment"     element={<PaymentPage />} />
 
-              {/* DIY flow — requires sign-in (saved per account) */}
+              {/* DIY: preferences is open; sign-in is required from the boundary step on */}
+              <Route path="/diy/preferences"     element={<DiyPreferencesPage />} />
               <Route element={<RequireAuth><Outlet /></RequireAuth>}>
-                <Route path="/diy/preferences"     element={<DiyPreferencesPage />} />
                 <Route path="/diy/concept"         element={<DiyConceptPage />} />
                 <Route path="/diy/payment"         element={<DiyPaymentPage />} />
                 <Route path="/diy/boundary"        element={<DiyBoundaryPage />} />
