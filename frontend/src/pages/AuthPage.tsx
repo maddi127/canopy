@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import Logo from '../components/Logo';
 import { useAuth } from '../context/AuthContext';
 import { isSupabaseConfigured } from '../lib/supabase';
+import { addressExists, currentAddress } from '../services/projectsService';
 
 type Mode = 'signin' | 'signup';
 
@@ -12,7 +13,22 @@ export default function AuthPage() {
   const location = useLocation();
   const redirectTo = (location.state as { from?: { pathname: string } })?.from?.pathname ?? '/projects';
 
-  const [mode, setMode] = useState<Mode>('signin');
+  // Default to sign-up; if the address we're working on is already in the DB,
+  // it's likely a returning user, so flip to sign-in.
+  const [mode, setMode] = useState<Mode>('signup');
+
+  useEffect(() => {
+    const addr = currentAddress();
+    if (!addr) return;
+    let active = true;
+    addressExists(addr).then((exists) => {
+      if (active && exists) setMode('signin');
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +61,10 @@ export default function AuthPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-soil-100 px-4">
+    <div
+      className="min-h-screen flex flex-col items-center justify-center px-4"
+      style={{ backgroundColor: '#efe9db' }}
+    >
       <Link to="/" className="mb-8">
         <Logo />
       </Link>

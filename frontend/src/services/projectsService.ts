@@ -119,6 +119,24 @@ function readAddressParts(bundle: Record<string, string>): AddressParts | null {
   }
 }
 
+/** The address the current DIY session is working on, from localStorage. */
+export function currentAddress(): string | null {
+  const raw = localStorage.getItem('initialAddress');
+  if (!raw) return null;
+  return readAddressParts({ initialAddress: raw })?.formatted ?? null;
+}
+
+/**
+ * Whether this address already exists in the database for any user (via a
+ * SECURITY DEFINER RPC, since RLS hides addresses pre-auth). Used to default
+ * the auth page to sign-in for returning addresses. Fails closed to `false`.
+ */
+export async function addressExists(formattedAddress: string): Promise<boolean> {
+  const { data, error } = await supabase.rpc('address_exists', { p_address: formattedAddress });
+  if (error) return false;
+  return Boolean(data);
+}
+
 async function requireUserId(): Promise<string> {
   const { data, error } = await supabase.auth.getUser();
   if (error || !data.user) throw new Error('You must be signed in to do that.');
