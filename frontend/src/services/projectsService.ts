@@ -209,6 +209,39 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   });
 }
 
+export interface ProjectWithAddress {
+  id: string;
+  name: string;
+  updated_at: string;
+  address_id: string | null;
+  address: string | null;
+}
+
+/**
+ * All of the user's projects with their linked address, newest first — used by
+ * the homes → projects view to group projects under each home client-side.
+ */
+export async function listProjectsWithAddress(): Promise<ProjectWithAddress[]> {
+  const { data, error } = await supabase
+    .from('projects')
+    .select('id, name, updated_at, address_id, addresses ( formatted_address )')
+    .order('updated_at', { ascending: false });
+
+  if (error) throw error;
+
+  return (data ?? []).map((row: Record<string, unknown>) => {
+    const rel = row.addresses as { formatted_address?: string } | { formatted_address?: string }[] | null;
+    const addr = Array.isArray(rel) ? rel[0] : rel;
+    return {
+      id: row.id as string,
+      name: row.name as string,
+      updated_at: row.updated_at as string,
+      address_id: (row.address_id as string) ?? null,
+      address: addr?.formatted_address ?? null,
+    };
+  });
+}
+
 /** List the current user's addresses ("homes"), each with its project count. */
 export async function listAddresses(): Promise<(Address & { project_count: number })[]> {
   const { data, error } = await supabase
