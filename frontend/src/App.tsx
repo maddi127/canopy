@@ -4,11 +4,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider } from './context/AuthContext';
 import RequireAuth from './components/RequireAuth';
 import SaveProjectButton from './components/SaveProjectButton';
-import AuthNav from './components/AuthNav';
 import AuthPage from './pages/AuthPage';
 import MyProjectsPage from './pages/MyProjectsPage';
 
 import HomePage from './pages/HomePage';
+import AddressPage from './pages/AddressPage';
 import PreferencesGoalsPage from './pages/PreferencesGoalsPage';
 import PaymentPage from './pages/PaymentPage';
 
@@ -40,6 +40,7 @@ function App() {
               <Route path="/projects" element={<RequireAuth><MyProjectsPage /></RequireAuth>} />
 
               <Route path="/" element={<HomePage />} />
+              <Route path="/start" element={<AddressPage />} />
               <Route path="/preferences" element={<PreferencesGoalsPage nextPath="/diy/boundary" skipPhoto />} />
               <Route path="/payment"     element={<PaymentPage />} />
 
@@ -59,7 +60,6 @@ function App() {
                 <Route path="/diy/plan"            element={<DiyPlanPage />} />
               </Route>
             </Routes>
-            <AuthNav />
             <SaveProjectButton />
           </div>
         </Router>

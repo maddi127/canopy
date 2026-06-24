@@ -2,18 +2,13 @@ import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
 import AddressInput from '../features/onboarding/AddressInput';
+import { useAuth } from '../context/AuthContext';
 
 const BG  = '#e9e4d9';
 const DARK = '#1a1a16';
 const RUST = '#c96b3a';
 const IS = "'Instrument Serif', serif";
 const IT = "'Inter Tight', sans-serif";
-
-const TRUST_BADGES = [
-  '48 hour turnaround',
-  'Free plant swaps',
-  'Install with anyone',
-];
 
 const STEPS = [
   {
@@ -258,6 +253,7 @@ const STEP_ILLUSTRATIONS = [HouseIllustration, PaletteIllustration, PlanDocIllus
 
 export default function HomePage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   const handleAddressSelect = useCallback((address: string, lat: number, lng: number) => {
     localStorage.setItem('initialAddress', JSON.stringify({ address, lat, lng }));
@@ -265,6 +261,12 @@ export default function HomePage() {
     localStorage.removeItem('generatedConcept');
     localStorage.removeItem('conceptFeatures');
     navigate('/diy/preferences');
+  }, [navigate]);
+
+  // Starting a plan without an address on the homepage sends them to the
+  // address step first; otherwise continue straight into preferences.
+  const startPlan = useCallback(() => {
+    navigate(localStorage.getItem('initialAddress') ? '/diy/preferences' : '/start');
   }, [navigate]);
 
   return (
@@ -275,12 +277,13 @@ export default function HomePage() {
         <Logo />
         <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
           <button
+            onClick={() => navigate(user ? '/projects' : '/auth')}
             style={{ fontFamily: IT, fontSize: '0.88rem', color: '#5a5a50', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 500 }}
           >
-            Sign in
+            {user ? 'My designs' : 'Sign in'}
           </button>
           <button
-            onClick={() => navigate('/diy/preferences')}
+            onClick={startPlan}
             style={{
               fontFamily: IT,
               fontSize: '0.88rem',
@@ -296,7 +299,7 @@ export default function HomePage() {
               gap: '6px',
             }}
           >
-            Start a plan →
+            Start my design →
           </button>
         </div>
       </header>
@@ -323,7 +326,7 @@ export default function HomePage() {
             alignItems: 'center',
             backgroundColor: 'white',
             borderRadius: '100px',
-            padding: '6px 6px 6px 18px',
+            padding: '6px 20px 6px 18px',
             boxShadow: '0 4px 28px rgba(26,26,22,0.13)',
             marginBottom: '18px',
             maxWidth: '460px',
@@ -337,38 +340,6 @@ export default function HomePage() {
             <div style={{ flex: 1, minWidth: 0 }}>
               <AddressInput onAddressSelect={handleAddressSelect} />
             </div>
-
-            {/* CTA button */}
-            <button
-              onClick={() => navigate('/diy/preferences')}
-              style={{
-                fontFamily: IT,
-                fontSize: '0.875rem',
-                fontWeight: 600,
-                color: BG,
-                backgroundColor: '#3d7a5c',
-                border: 'none',
-                borderRadius: '100px',
-                padding: '12px 20px',
-                cursor: 'pointer',
-                flexShrink: 0,
-                whiteSpace: 'nowrap',
-              }}
-            >
-              Get my plan →
-            </button>
-          </div>
-
-          {/* Trust badges */}
-          <div style={{ display: 'flex', gap: '18px', flexWrap: 'wrap' }}>
-            {TRUST_BADGES.map(badge => (
-              <span key={badge} style={{ display: 'flex', alignItems: 'center', gap: '5px', fontFamily: IT, fontSize: '0.82rem', color: '#5a5a50', fontWeight: 500 }}>
-                <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                  <path d="M2 6.5L5.2 9.5L11 3.5" stroke="#3d7a5c" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-                {badge}
-              </span>
-            ))}
           </div>
         </div>
 
@@ -379,17 +350,10 @@ export default function HomePage() {
       </section>
 
       {/* ── How It Works ── */}
-      <section style={{ padding: '80px 48px', maxWidth: '700px', margin: '0 auto' }}>
-        <p style={{ fontFamily: IT, fontSize: '0.75rem', color: '#8a8a7a', letterSpacing: '0.14em', fontWeight: 500, marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+      <section style={{ padding: '80px 48px 0', maxWidth: '1100px', margin: '0 auto' }}>
+        <p style={{ fontFamily: IT, fontSize: '0.75rem', color: '#8a8a7a', letterSpacing: '0.14em', fontWeight: 500, margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
           <span style={{ display: 'inline-block', width: '28px', height: '1.5px', backgroundColor: '#9a9485' }} />
           HOW IT WORKS
-        </p>
-        <h2 style={{ fontFamily: IS, fontSize: 'clamp(2rem, 3.5vw, 3rem)', color: DARK, lineHeight: 1.15, fontWeight: 400, margin: '0 0 20px' }}>
-          Five small decisions,{' '}
-          <em style={{ fontStyle: 'italic', color: RUST }}>one<br />finished plan.</em>
-        </h2>
-        <p style={{ fontFamily: IT, fontSize: '0.92rem', color: '#5a5a50', lineHeight: 1.7, margin: 0 }}>
-          No designer back-and-forth. No 90-page consultation deck. You answer a handful of questions, we build a plan rooted in what actually grows where you live.
         </p>
       </section>
 
@@ -411,27 +375,9 @@ export default function HomePage() {
                 <p style={{ fontFamily: IT, fontSize: '0.7rem', color: RUST, letterSpacing: '0.14em', fontWeight: 600, marginBottom: '14px', margin: '0 0 14px' }}>
                   {step.label}
                 </p>
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '20px', marginBottom: '14px' }}>
-                  <h3 style={{ fontFamily: IS, fontSize: '1.75rem', color: DARK, lineHeight: 1.2, fontWeight: 400, margin: 0 }}>
-                    {step.title}
-                  </h3>
-                  <div style={{
-                    flexShrink: 0,
-                    width: '40px',
-                    height: '40px',
-                    borderRadius: '50%',
-                    border: `1.5px solid ${DARK}`,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontFamily: IS,
-                    fontSize: '1rem',
-                    color: DARK,
-                    marginTop: '4px',
-                  }}>
-                    {step.num}
-                  </div>
-                </div>
+                <h3 style={{ fontFamily: IS, fontSize: '1.75rem', color: DARK, lineHeight: 1.2, fontWeight: 400, margin: '0 0 14px' }}>
+                  {step.title}
+                </h3>
                 <p style={{ fontFamily: IT, fontSize: '0.87rem', color: '#5a5a50', lineHeight: 1.7, margin: '0 0 16px' }}>
                   {step.desc}
                 </p>
@@ -457,29 +403,6 @@ export default function HomePage() {
         })}
       </section>
 
-      {/* ── Footer CTA ── */}
-      <section style={{ backgroundColor: '#2d4e2a', padding: '80px 48px', textAlign: 'center' }}>
-        <h2 style={{ fontFamily: IS, fontSize: 'clamp(2rem, 3.5vw, 3.2rem)', color: '#e9e4d9', lineHeight: 1.15, fontWeight: 400, margin: '0 0 32px' }}>
-          Ready to see your plan?
-        </h2>
-        <button
-          onClick={() => navigate('/diy/preferences')}
-          style={{
-            fontFamily: IT,
-            fontSize: '0.95rem',
-            fontWeight: 600,
-            color: '#2d4e2a',
-            backgroundColor: '#e9e4d9',
-            border: 'none',
-            borderRadius: '100px',
-            padding: '16px 36px',
-            cursor: 'pointer',
-          }}
-        >
-          Start a plan →
-        </button>
-      </section>
-
       {/* ── Global style overrides for geocoder ── */}
       <style>{`
         .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder {
@@ -496,6 +419,7 @@ export default function HomePage() {
           color: #1a1a16 !important;
           padding: 0 4px !important;
           height: 42px !important;
+          line-height: 42px !important;
           background: transparent !important;
           min-width: 0 !important;
         }

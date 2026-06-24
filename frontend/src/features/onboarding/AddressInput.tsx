@@ -16,7 +16,7 @@ export default function AddressInput({ onAddressSelect }: AddressInputProps) {
 
     const geocoder = new MapboxGeocoder({
       accessToken: MAPBOX_TOKEN,
-      placeholder: 'Enter your home address',
+      placeholder: 'Enter your home address to start designing',
       countries: 'us',
     });
 
