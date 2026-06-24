@@ -37,14 +37,26 @@ export const DIY_STATE_KEYS = [
 export interface ProjectSummary {
   id: string;
   name: string;
+  /** Derived from the linked address (addresses.formatted_address). */
   address: string | null;
   updated_at: string;
 }
 
-export interface ProjectRow extends ProjectSummary {
+export interface ProjectRow {
+  id: string;
   user_id: string;
+  name: string;
+  address_id: string | null;
   data: Record<string, unknown>;
   created_at: string;
+  updated_at: string;
+}
+
+export interface Address {
+  id: string;
+  formatted_address: string;
+  lat: number | null;
+  lng: number | null;
 }
 
 /** Read the current DIY flow state out of localStorage into a plain object. */
@@ -82,32 +94,70 @@ function setActiveProjectId(id: string): void {
   localStorage.setItem(ACTIVE_KEY, id);
 }
 
-function readAddress(bundle: Record<string, string>): string | null {
+interface AddressParts {
+  formatted: string;
+  lat: number | null;
+  lng: number | null;
+}
+
+/** Parse the `initialAddress` localStorage value: `{ address, lat, lng }`. */
+function readAddressParts(bundle: Record<string, string>): AddressParts | null {
   const raw = bundle.initialAddress;
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
-    if (typeof parsed === 'string') return parsed;
-    if (parsed && typeof parsed.address === 'string') return parsed.address;
-    if (parsed && typeof parsed.formatted === 'string') return parsed.formatted;
+    if (typeof parsed === 'string') return { formatted: parsed, lat: null, lng: null };
+    const formatted: string | undefined = parsed?.address ?? parsed?.formatted;
+    if (!formatted) return null;
+    return {
+      formatted,
+      lat: typeof parsed?.lat === 'number' ? parsed.lat : null,
+      lng: typeof parsed?.lng === 'number' ? parsed.lng : null,
+    };
   } catch {
-    return raw;
+    return { formatted: raw, lat: null, lng: null };
   }
-  return raw;
+}
+
+async function requireUserId(): Promise<string> {
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data.user) throw new Error('You must be signed in to do that.');
+  return data.user.id;
+}
+
+/**
+ * Find-or-create the address ("home") for the current project state and return
+ * its id. One row per (user, formatted_address); coordinates are refreshed.
+ */
+async function resolveAddressId(userId: string, bundle: Record<string, string>): Promise<string | null> {
+  const parts = readAddressParts(bundle);
+  if (!parts) return null;
+
+  const { data, error } = await supabase
+    .from('addresses')
+    .upsert(
+      { user_id: userId, formatted_address: parts.formatted, lat: parts.lat, lng: parts.lng },
+      { onConflict: 'user_id,formatted_address' },
+    )
+    .select('id')
+    .single();
+
+  if (error) throw error;
+  return (data as { id: string }).id;
 }
 
 /** Insert a new project from the current localStorage state. */
 export async function saveCurrentProject(name: string): Promise<ProjectRow> {
-  const { data: userData, error: userErr } = await supabase.auth.getUser();
-  if (userErr || !userData.user) throw new Error('You must be signed in to save a project.');
-
+  const userId = await requireUserId();
   const bundle = collectLocalState();
+  const address_id = await resolveAddressId(userId, bundle);
+
   const { data, error } = await supabase
     .from('projects')
     .insert({
-      user_id: userData.user.id,
+      user_id: userId,
       name: name.trim() || 'Untitled project',
-      address: readAddress(bundle),
+      address_id,
       data: bundle,
     })
     .select()
@@ -120,8 +170,11 @@ export async function saveCurrentProject(name: string): Promise<ProjectRow> {
 
 /** Overwrite an existing project with the current localStorage state. */
 export async function updateProject(id: string, name?: string): Promise<ProjectRow> {
+  const userId = await requireUserId();
   const bundle = collectLocalState();
-  const patch: Record<string, unknown> = { data: bundle, address: readAddress(bundle) };
+  const address_id = await resolveAddressId(userId, bundle);
+
+  const patch: Record<string, unknown> = { data: bundle, address_id };
   if (name !== undefined) patch.name = name.trim() || 'Untitled project';
 
   const { data, error } = await supabase
@@ -139,11 +192,42 @@ export async function updateProject(id: string, name?: string): Promise<ProjectR
 export async function listProjects(): Promise<ProjectSummary[]> {
   const { data, error } = await supabase
     .from('projects')
-    .select('id, name, address, updated_at')
+    .select('id, name, updated_at, addresses ( formatted_address )')
     .order('updated_at', { ascending: false });
 
   if (error) throw error;
-  return (data ?? []) as ProjectSummary[];
+
+  return (data ?? []).map((row: Record<string, unknown>) => {
+    const rel = row.addresses as { formatted_address?: string } | { formatted_address?: string }[] | null;
+    const addr = Array.isArray(rel) ? rel[0] : rel;
+    return {
+      id: row.id as string,
+      name: row.name as string,
+      updated_at: row.updated_at as string,
+      address: addr?.formatted_address ?? null,
+    };
+  });
+}
+
+/** List the current user's addresses ("homes"), each with its project count. */
+export async function listAddresses(): Promise<(Address & { project_count: number })[]> {
+  const { data, error } = await supabase
+    .from('addresses')
+    .select('id, formatted_address, lat, lng, projects ( count )')
+    .order('updated_at', { ascending: false });
+
+  if (error) throw error;
+
+  return (data ?? []).map((row: Record<string, unknown>) => {
+    const rel = row.projects as { count: number }[] | null;
+    return {
+      id: row.id as string,
+      formatted_address: row.formatted_address as string,
+      lat: (row.lat as number) ?? null,
+      lng: (row.lng as number) ?? null,
+      project_count: rel?.[0]?.count ?? 0,
+    };
+  });
 }
 
 /** Fetch a project and hydrate localStorage with its saved state. */
