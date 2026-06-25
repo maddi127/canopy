@@ -45,6 +45,13 @@ const FEATURE_COLOR: Record<string, string> = {
   structure: '#9A8B78',
 };
 
+// Display feature names in sentence case (only the first letter capitalized) to match /placement.
+function toSentenceCase(s: string): string {
+  if (!s) return s;
+  const lower = s.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
 function getFeatureDimsFt(verts: [number, number][]): { w: number; h: number } | null {
   if (verts.length < 3) return null;
   try {
@@ -108,7 +115,8 @@ export default function DiyBoundaryPage() {
   const sc = useMemo<any>(() => { try { return JSON.parse(localStorage.getItem('siteContext') || '{}'); } catch { return {}; } }, []);
   const center: [number, number] = [sc.lng ?? -104.99, sc.lat ?? 39.74];
 
-  const visibleSteps: StepId[] = ['boundary', 'identify', 'door'];
+  // 'door' is built but hidden for now — drop it from the steps and the continue gate.
+  const visibleSteps: StepId[] = ['boundary', 'identify'];
 
   // ── Boundary ─────────────────────────────────────────────────────────────────
   const isDblClickRef = useRef(false);
@@ -164,6 +172,8 @@ export default function DiyBoundaryPage() {
   const [openStep, setOpenStep] = useState<StepId | null>('boundary');
   // Bumped on Re-draw to remount the map and clear any stale overlays.
   const [mapEpoch, setMapEpoch] = useState(0);
+  // The live map instance, set in onLoad — used to manage feature overlays imperatively.
+  const [mapObj, setMapObj] = useState<google.maps.Map | null>(null);
 
   // ── Confirmed features ───────────────────────────────────────────────────────
   const [features, setFeatures] = useState<ConfirmedFeature[]>(() => {
@@ -191,7 +201,7 @@ export default function DiyBoundaryPage() {
   // The active detected feature is the one editable on the map.
   const [activeId, setActiveId] = useState<string | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
-  const currentReview = features.find(f => f.id === activeId) ?? null;
+  const currentReview = useMemo(() => features.find(f => f.id === activeId) ?? null, [features, activeId]);
 
   // Auto-advance the active feature to the next un-decided, non-deleted one.
   useEffect(() => {
@@ -211,8 +221,9 @@ export default function DiyBoundaryPage() {
     else localStorage.removeItem('diyDoorPoint');
   }, [doorPoint]);
 
-  // Continue only once the area is drawn, every feature is confirmed/deleted, and the door is marked.
-  const canContinue = boundaryDone && identifyDone && doorPoint !== null;
+  // Continue once the area is drawn and every feature is confirmed/deleted.
+  // (Door marking is hidden for now, so it no longer gates Continue.)
+  const canContinue = boundaryDone && identifyDone;
 
   const resolveFeature = useCallback((id: string, decision: 'keep' | 'remove' | 'not_real') => {
     setFeatures(prev =>
@@ -413,7 +424,37 @@ export default function DiyBoundaryPage() {
       ? [...ePolyVerts, mousePos] : null,
   [isPolyAddMode, ePolyStep, ePolyVerts, mousePos]);
 
-  const showConfirmedFeatures = features.length > 0 && openStep !== 'boundary';
+  const showConfirmedFeatures = features.length > 0 && !drawing;
+
+  // ── Imperative feature outlines ──────────────────────────────────────────────
+  // @react-google-maps doesn't reliably update or remove <Polygon>/<Polyline>
+  // overlays, leaving moved/deleted features ghosted at their old spot. We draw
+  // the feature outlines directly on the map and clean them up on every change.
+  useEffect(() => {
+    if (!mapObj || !showConfirmedFeatures) return;
+    const overlays: (google.maps.Polyline | google.maps.Polygon)[] = [];
+    // Reviewed & kept — solid coloured outline.
+    cfKeepGeoJSON.features.forEach((f) => {
+      const color = FEATURE_COLOR[f.properties.featureType] ?? '#2F6B4F';
+      overlays.push(new google.maps.Polyline({ map: mapObj, path: toPath(f.geometry.coordinates[0]), strokeColor: color, strokeWeight: 2.5, strokeOpacity: 1, clickable: false }));
+    });
+    if (openStep === 'identify') {
+      // Pending (not yet reviewed) — faint fill + dashed outline.
+      cfPendingGeoJSON.features.forEach((f) => {
+        const path = toPath(f.geometry.coordinates[0]);
+        overlays.push(new google.maps.Polygon({ map: mapObj, paths: path, fillColor: '#FFFFFF', fillOpacity: 0.08, strokeOpacity: 0, clickable: false }));
+        overlays.push(new google.maps.Polyline({ map: mapObj, path, ...dashedLine('#FFFFFF', 2), clickable: false }));
+      });
+      // Active — yellow highlight.
+      if (cfActiveGeoJSON) {
+        const path = toPath(cfActiveGeoJSON.geometry.coordinates[0]);
+        overlays.push(new google.maps.Polygon({ map: mapObj, paths: path, fillColor: '#F5C518', fillOpacity: 0.38, strokeOpacity: 0, clickable: false }));
+        overlays.push(new google.maps.Polyline({ map: mapObj, path, strokeColor: '#F5C518', strokeWeight: 7, strokeOpacity: 0.35, clickable: false }));
+        overlays.push(new google.maps.Polyline({ map: mapObj, path, strokeColor: '#FFFFFF', strokeWeight: 2.5, clickable: false }));
+      }
+    }
+    return () => { overlays.forEach((o) => o.setMap(null)); };
+  }, [mapObj, cfKeepGeoJSON, cfPendingGeoJSON, cfActiveGeoJSON, openStep, showConfirmedFeatures]);
 
   const goToPlacement = useCallback(() => {
     if (vertices.length < 3) return;
@@ -717,7 +758,7 @@ export default function DiyBoundaryPage() {
                                   <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, background: FEATURE_COLOR[f.type] ?? '#9A9A92' }} />
                                   <div style={{ flex: 1, minWidth: 0 }}>
                                     <div style={{ fontFamily: IT, fontSize: '0.88rem', color: '#2A2A26', fontWeight: 600 }}>
-                                      {f.label || (f.type.charAt(0).toUpperCase() + f.type.slice(1))}
+                                      {toSentenceCase(f.label || f.type)}
                                     </div>
                                   </div>
                                   <div className="flex gap-1.5" onClick={e => e.stopPropagation()}>
@@ -751,7 +792,7 @@ export default function DiyBoundaryPage() {
                                   <div key={f.id} className="flex items-center gap-3 rounded-xl px-3 py-2" style={{ background: 'rgba(42,42,38,0.04)' }}>
                                     <div style={{ width: 18, height: 18, borderRadius: 4, flexShrink: 0, opacity: 0.5, background: FEATURE_COLOR[f.type] ?? '#9A9A92' }} />
                                     <span style={{ flex: 1, minWidth: 0, fontFamily: IT, fontSize: '0.8rem', color: '#9A9A92', textDecoration: 'line-through', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                      {f.label || (f.type.charAt(0).toUpperCase() + f.type.slice(1))}
+                                      {toSentenceCase(f.label || f.type)}
                                     </span>
                                     <button onClick={() => restoreFeature(f.id)}
                                       style={{ flexShrink: 0, background: 'none', border: '1.5px solid rgba(42,42,38,0.2)', borderRadius: 100, padding: '3px 10px', cursor: 'pointer', fontFamily: IT, fontSize: '0.72rem', fontWeight: 500, color: '#2A2A26' }}>
@@ -805,18 +846,18 @@ export default function DiyBoundaryPage() {
                                   <button onClick={() => setAddPickerOpen(false)}
                                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0 }}>✕</button>
                                 </div>
-                                <div className="flex flex-wrap gap-2">
+                                <div className="flex flex-col gap-2">
                                   {([
-                                    { mode: 'tree'      as const, label: 'Tree',      color: '#5C8A5C' },
-                                    { mode: 'structure' as const, label: 'Structure', color: '#9A8B78' },
-                                    { mode: 'walkway'   as const, label: 'Walkway',   color: '#B5A48B' },
-                                    { mode: 'other'     as const, label: 'Other',     color: '#9A9A92' },
-                                  ]).map(({ mode, label, color }) => (
+                                    { mode: 'tree'      as const, label: 'Tree',      color: '#5C8A5C', shape: 'circle' as const },
+                                    { mode: 'structure' as const, label: 'Structure', color: '#9A8B78', shape: 'rect'   as const },
+                                    { mode: 'walkway'   as const, label: 'Walkway',   color: '#B5A48B', shape: 'rect'   as const },
+                                    { mode: 'other'     as const, label: 'Other',     color: '#9A9A92', shape: 'rect'   as const },
+                                  ]).map(({ mode, label, color, shape }) => (
                                     <button key={label} onClick={() => { startAdd(mode); setAddPickerOpen(false); }}
-                                      className="flex items-center gap-2 px-3 py-2 rounded-xl hover:opacity-80 transition-all"
-                                      style={{ background: 'rgba(255,255,255,0.7)', border: '1.5px solid rgba(42,42,38,0.12)', cursor: 'pointer' }}>
-                                      <div style={{ width: 14, height: 14, borderRadius: 3, background: color, flexShrink: 0 }} />
-                                      <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#2A2A26', fontWeight: 500 }}>{label}</span>
+                                      className="flex items-center gap-3 rounded-2xl p-3 hover:opacity-90 transition-all"
+                                      style={{ width: '100%', background: 'white', border: '1.5px solid transparent', cursor: 'pointer', textAlign: 'left' }}>
+                                      <div style={{ width: 28, height: 28, flexShrink: 0, borderRadius: shape === 'circle' ? '50%' : 6, background: color }} />
+                                      <span style={{ fontFamily: IT, fontSize: '0.85rem', color: '#2A2A26', fontWeight: 600 }}>{label}</span>
                                     </button>
                                   ))}
                                 </div>
@@ -863,17 +904,7 @@ export default function DiyBoundaryPage() {
                           </div>
                         ) : (
                           <div className="flex flex-col gap-3 pt-3">
-                            <div className="flex items-center justify-between">
-                              <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#9A9A92', lineHeight: 1.5 }}>
-                                {addMode === 'tree'
-                                  ? eTreeStep === 'placing' ? 'Click the map to place the tree center.'
-                                    : 'Click again to set the canopy size.'
-                                  : ePolyVerts.length === 0 ? 'Click to start the outline.'
-                                  : ePolyVerts.length < 3 ? `${3 - ePolyVerts.length} more point${3 - ePolyVerts.length !== 1 ? 's' : ''} needed.`
-                                  : 'Add corners, then tap Finish.'}
-                              </span>
-                              <button onClick={cancelAdd} style={{ fontFamily: IT, fontSize: '0.72rem', color: '#B0B0A6', background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 }}>✕</button>
-                            </div>
+                            <button onClick={cancelAdd} style={{ alignSelf: 'flex-start', fontFamily: IT, fontSize: '0.75rem', color: '#B0B0A6', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>✕ Cancel</button>
                             {isPolyAddMode && ePolyVerts.length > 0 && (
                               <button onClick={() => setEPolyVerts(v => v.slice(0, -1))}
                                 style={{ fontFamily: IT, fontSize: '0.72rem', color: '#9A9A92', background: 'none', border: 'none', cursor: 'pointer', padding: 0, alignSelf: 'flex-start' }}>
@@ -920,7 +951,8 @@ export default function DiyBoundaryPage() {
                 }}
                 onClick={handleMapClick}
                 onMouseMove={handleMouseMove}
-                onLoad={map => { mapRef.current = map; map.addListener('dblclick', (ev: google.maps.MapMouseEvent) => dblHandlerRef.current?.(ev)); }}
+                onLoad={map => { mapRef.current = map; setMapObj(map); map.addListener('dblclick', (ev: google.maps.MapMouseEvent) => dblHandlerRef.current?.(ev)); }}
+                onUnmount={() => setMapObj(null)}
               >
                 {/* Boundary polygon */}
                 {vertices.length >= 3 && (
@@ -950,33 +982,7 @@ export default function DiyBoundaryPage() {
 
                 {/* Confirmed existing-site features */}
                 {showConfirmedFeatures && (<>
-                  {/* Reviewed & kept — solid outline only */}
-                  {cfKeepGeoJSON.features.map((f) => {
-                    const color = FEATURE_COLOR[f.properties.featureType] ?? '#2F6B4F';
-                    return (
-                      <Polyline key={`cfk-${f.properties.id}`} path={toPath(f.geometry.coordinates[0])}
-                        options={{ strokeColor: color, strokeWeight: 2.5, strokeOpacity: 1, clickable: false }} />
-                    );
-                  })}
-                  {/* Pending (not yet reviewed) */}
-                  {openStep === 'identify' && cfPendingGeoJSON.features.map((f) => (
-                    <Fragment key={`cfp-${f.properties.id}`}>
-                      <Polygon paths={toPath(f.geometry.coordinates[0])}
-                        options={{ fillColor: '#FFFFFF', fillOpacity: 0.08, strokeOpacity: 0, clickable: false }} />
-                      <Polyline path={toPath(f.geometry.coordinates[0])} options={dashedLine('#FFFFFF', 2)} />
-                    </Fragment>
-                  ))}
-                  {/* Active review — yellow highlight */}
-                  {cfActiveGeoJSON && openStep === 'identify' && (
-                    <Fragment key={`cfa-${currentReview?.id ?? 'none'}`}>
-                      <Polygon paths={toPath(cfActiveGeoJSON.geometry.coordinates[0])}
-                        options={{ fillColor: '#F5C518', fillOpacity: 0.38, strokeOpacity: 0, clickable: false }} />
-                      <Polyline path={toPath(cfActiveGeoJSON.geometry.coordinates[0])}
-                        options={{ strokeColor: '#F5C518', strokeWeight: 7, strokeOpacity: 0.35, clickable: false }} />
-                      <Polyline path={toPath(cfActiveGeoJSON.geometry.coordinates[0])}
-                        options={{ strokeColor: '#FFFFFF', strokeWeight: 2.5, clickable: false }} />
-                    </Fragment>
-                  )}
+                  {/* Feature outlines (kept / pending / active) are drawn imperatively — see effect above */}
                   {/* Edit handles */}
                   {openStep === 'identify' && currentReview && currentReview.keep !== false && activeFeatureCenter && (<>
                     <Marker position={{ lat: activeFeatureCenter[1], lng: activeFeatureCenter[0] }} draggable
@@ -1065,6 +1071,19 @@ export default function DiyBoundaryPage() {
                 style={{ top: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 10, background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer', boxShadow: '0 4px 16px rgba(0,0,0,0.35)' }}>
                 Done
               </button>
+            )}
+
+            {/* Drawing instruction — shown at the top of the map while adding a feature */}
+            {addMode !== null && ePolyStep !== 'attributes' && (
+              <div className="absolute px-5 py-2.5 rounded-full"
+                style={{ top: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 10, background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, boxShadow: '0 4px 16px rgba(0,0,0,0.35)', maxWidth: 'calc(100% - 32px)', whiteSpace: 'nowrap', textAlign: 'center' }}>
+                {addMode === 'tree'
+                  ? eTreeStep === 'placing' ? 'Click the map to place the tree center.'
+                    : 'Click again to set the canopy size.'
+                  : ePolyVerts.length === 0 ? 'Click to start the outline.'
+                  : ePolyVerts.length < 3 ? `${3 - ePolyVerts.length} more point${3 - ePolyVerts.length !== 1 ? 's' : ''} needed.`
+                  : 'Add corners, then tap Finish.'}
+              </div>
             )}
 
           </div>

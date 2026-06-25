@@ -113,7 +113,7 @@ export const DESIGN_TEMPLATES: DesignTemplate[] = [
       { role: 'secondary_activity', rule: 'If dining or cooking: integrate into the same hardscape pad, extending the primary footprint.', condition: 'user_picked: dining OR cooking' },
       { role: 'anchor_tree',        rule: 'One large specimen tree adjacent to primary_activity, offset to one side (not centered) for partial shade.', count: 1 },
       { role: 'framing_tree',       rule: '2-3 trees positioned at corners or along edges facing the house, enclosing the courtyard.', count: '2-3' },
-      { role: 'water_feature',      rule: 'If selected: directly adjacent to primary seating as a partial enclosure element (raised basin or wall fountain).', condition: 'user_picked: water_feature' },
+      { role: 'water_feature',      rule: 'If selected: a partial enclosure element (raised basin or wall fountain) beside the primary activity zone when one exists, otherwise a focal point on the main sightline from the house.', condition: 'user_picked: water_feature' },
       { role: 'foundation_bed',     rule: 'Activate, narrow (3 ft). Courtyard is the focal point, not the house edge.' },
       { role: 'perimeter_bed',      rule: 'Activate full perimeter. Beds wrap inward toward the central hardscape.' },
     ],
@@ -331,7 +331,7 @@ export const DESIGN_TEMPLATES: DesignTemplate[] = [
       { role: 'framing_tree',         rule: '2-3 trees positioned at corners or along edges, enclosing the courtyard.', count: '2-3' },
       { role: 'specimen_plant',       rule: 'Architectural specimens (agave, yucca) at the perimeter of the hardscape pad as transition elements.', count: '3-6' },
       { role: 'ground_field',         rule: 'DG fills space between the central pad and perimeter; no continuous beds.' },
-      { role: 'water_feature',        rule: 'If selected: architectural basin or wall fountain adjacent to primary seating. Sound (cooling) and visual.', condition: 'user_picked: water_feature' },
+      { role: 'water_feature',        rule: 'If selected: architectural basin or wall fountain beside the primary activity zone if present, otherwise a focal point visible from the house. Sound (cooling) and visual.', condition: 'user_picked: water_feature' },
     ],
     bed_pattern: {
       shape_language: 'no_continuous_beds',

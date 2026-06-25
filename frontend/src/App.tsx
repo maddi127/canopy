@@ -24,6 +24,7 @@ import DiyPlanRevealPage     from './pages/DiyPlanRevealPage';
 import DiyPlantSelectPage    from './pages/DiyPlantSelectPage';
 import DiyLayoutPage         from './pages/DiyLayoutPage';
 import DiyPlacementPage      from './pages/DiyPlacementPage';
+import DiyReviewPage         from './pages/DiyReviewPage';
 
 const queryClient = new QueryClient();
 
@@ -56,6 +57,7 @@ function App() {
                 <Route path="/diy/render"          element={<DiyFinalRenderPage />} />
                 <Route path="/diy/layout"          element={<DiyLayoutPage />} />
                 <Route path="/diy/placement"       element={<DiyPlacementPage />} />
+                <Route path="/diy/review"          element={<DiyReviewPage />} />
                 <Route path="/diy/plan"            element={<DiyPlanPage />} />
               </Route>
             </Routes>

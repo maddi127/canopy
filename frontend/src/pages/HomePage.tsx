@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
 import AddressInput from '../features/onboarding/AddressInput';
 import { useAuth } from '../context/AuthContext';
+import { clearLocalState } from '../services/projectsService';
 
 const BG  = '#e9e4d9';
 const DARK = '#1a1a16';
@@ -14,24 +15,24 @@ const STEPS = [
   {
     num: '01',
     label: 'STEP 1',
-    title: 'Tell us about your space',
-    desc: 'Where you are, how the sun moves, what stays. Five minutes of questions and a couple photos — we do the rest.',
-    checks: ['Address + lot details', 'Sun & soil quick read', 'A handful of phone photos'],
-  },
+    title: 'Share your goals',
+    desc: 'We walk through what matters most to you and how you want to use the space.',
+    checks: ['Address + lot details', 'Existing features', 'Sun & soil analysis'],
+  },	  
   {
     num: '02',
     label: 'STEP 2',
-    title: 'Choose from a curated plant list',
-    desc: "We'll suggest plants that fit your style, climate, and sun. Swap anything you don't love before we lock it in.",
-    checks: ['Climate-matched selections', 'Style-filtered options', 'Swap freely before approving'],
+    title: 'Build your site plan',
+    desc: 'Where you are, how the sun moves, what stays.',
+    checks: ['Address + lot details', 'Existing features', 'Sun & soil analysis'],
   },
   {
     num: '03',
     label: 'STEP 3',
-    title: 'Review your finished plan',
-    desc: 'Precise plant placement, spacing, and a shopping list. One last pass — then the plan is yours to build.',
-    checks: ['Full site plan with spacing', 'Curated plant + material list', 'Installation-ready PDF'],
-  },
+    title: 'Choose from a curated plant list',
+    desc: "We'll suggest plants that fit your style, climate, and sun. Swap anything you don't love before we lock it in.",
+    checks: ['Climate-matched selections', 'Style-filtered options', 'Swap freely before approving'],
+  }
 ];
 
 // ── Plan illustration ─────────────────────────────────────────────────────────
@@ -142,10 +143,10 @@ function PlanIllustration() {
 
         {/* Zone badge overlay */}
         <g>
-          <rect x="36" y="36" width="156" height="24" rx="12" fill="white" opacity="0.92" />
+          <rect x="36" y="36" width="170" height="22" rx="11" fill="white" opacity="0.92" />
           <circle cx="50" cy="48" r="4" fill="#3d5c3a" />
-          <text x="60" y="52.5" fontFamily={IT} fontSize="10.5" fill="#1a1a16" fontWeight="500" letterSpacing="0.06em">
-            ZONE 6B · BRYN MAWR
+          <text x="60" y="52.5" fontFamily={IT} fontSize="10" fill="#1a1a16" fontWeight="500" letterSpacing="0.05em">
+            ZONE 7B · SALT LAKE CITY
           </text>
         </g>
       </svg>
@@ -256,10 +257,9 @@ export default function HomePage() {
   const { user } = useAuth();
 
   const handleAddressSelect = useCallback((address: string, lat: number, lng: number) => {
+    clearLocalState();
     localStorage.setItem('initialAddress', JSON.stringify({ address, lat, lng }));
     localStorage.setItem('siteContext', JSON.stringify({ address, lat, lng }));
-    localStorage.removeItem('generatedConcept');
-    localStorage.removeItem('conceptFeatures');
     navigate('/diy/preferences');
   }, [navigate]);
 
@@ -350,10 +350,11 @@ export default function HomePage() {
       </section>
 
       {/* ── How It Works ── */}
-      <section style={{ padding: '80px 48px 0', maxWidth: '1100px', margin: '0 auto' }}>
-        <p style={{ fontFamily: IT, fontSize: '0.75rem', color: '#8a8a7a', letterSpacing: '0.14em', fontWeight: 500, margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <span style={{ display: 'inline-block', width: '28px', height: '1.5px', backgroundColor: '#9a9485' }} />
+      <section style={{ padding: '80px 48px 56px', maxWidth: '1100px', margin: '0 auto' }}>
+        <p style={{ fontFamily: IT, fontSize: '1.05rem', color: '#3d5c3a', letterSpacing: '0.16em', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
+          <span style={{ display: 'inline-block', width: '36px', height: '2.5px', backgroundColor: '#3d5c3a' }} />
           HOW IT WORKS
+          <span style={{ display: 'inline-block', width: '36px', height: '2.5px', backgroundColor: '#3d5c3a' }} />
         </p>
       </section>
 

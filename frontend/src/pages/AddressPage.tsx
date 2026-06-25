@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
 import AddressInput from '../features/onboarding/AddressInput';
+import { clearLocalState } from '../services/projectsService';
 
 const BG = '#efe9db';
 const DARK = '#1a1a16';
@@ -18,10 +19,9 @@ export default function AddressPage() {
 
   const handleAddressSelect = useCallback(
     (address: string, lat: number, lng: number) => {
+      clearLocalState();
       localStorage.setItem('initialAddress', JSON.stringify({ address, lat, lng }));
       localStorage.setItem('siteContext', JSON.stringify({ address, lat, lng }));
-      localStorage.removeItem('generatedConcept');
-      localStorage.removeItem('conceptFeatures');
       navigate('/diy/preferences');
     },
     [navigate],

@@ -15,6 +15,7 @@ export const DIY_STATE_KEYS = [
   'diyDoorPoint',
   'diyDetectedFeatures',
   'diyConfirmedFeatures',
+  'diyDecidedFeatures',
   'conceptFeatures',
   'diySelectedConcepts',
   'generatedConcept',

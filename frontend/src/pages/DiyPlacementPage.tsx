@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSaveAndExit } from '../hooks/useSaveAndExit';
 import { GoogleMap, useJsApiLoader, Polygon } from '@react-google-maps/api';
+import * as turf from '@turf/turf';
 import Logo from '../components/Logo';
 import type { ConfirmedFeature } from './DiyFeatureConfirmPage';
 
@@ -28,12 +29,12 @@ interface ToolbarItem {
   color:    string;
   defaultW: number;
   defaultH: number;
-  shape:    'rect' | 'circle';
+  shape:    'rect' | 'circle' | 'organic';
 }
 
 const OPTIONAL_TOOLS: Record<string, ToolbarItem> = {
   walkway: { key: 'walkway', label: 'Walkway',            color: '#C4AD8C', defaultW: 4,  defaultH: 14, shape: 'rect'   },
-  seating: { key: 'seating', label: 'Seating / lounge',   color: '#B5A07A', defaultW: 12, defaultH: 12, shape: 'rect'   },
+  seating: { key: 'seating', label: 'Seating',            color: '#B5A07A', defaultW: 12, defaultH: 12, shape: 'rect'   },
   dining:  { key: 'dining',  label: 'Dining area',        color: '#C4A84A', defaultW: 12, defaultH: 12, shape: 'rect'   },
   cooking: { key: 'cooking', label: 'Fire pit / cooking', color: '#B87060', defaultW: 8,  defaultH: 8,  shape: 'rect'   },
   water:   { key: 'water',   label: 'Water feature',      color: '#6B93A8', defaultW: 6,  defaultH: 6,  shape: 'circle' },
@@ -42,16 +43,32 @@ const OPTIONAL_TOOLS: Record<string, ToolbarItem> = {
   trees:   { key: 'trees',   label: 'Shade trees',        color: '#5C8A5C', defaultW: 10, defaultH: 10, shape: 'circle' },
 };
 
+// Default shape per design style: clean rectangles for Modern/Traditional, soft
+// organic blobs for Whimsical/Desert. Trees stay round (canopy).
+const STYLE_SHAPE: Record<string, 'rect' | 'circle' | 'organic'> = {
+  modern_structured: 'rect',
+  traditional:       'rect',
+  natural_wild:      'organic',
+  desert_minimal:    'organic',
+};
+function shapeForStyle(key: string, style: string): 'rect' | 'circle' | 'organic' {
+  if (key === 'trees') return 'circle';
+  return STYLE_SHAPE[style] ?? OPTIONAL_TOOLS[key]?.shape ?? 'rect';
+}
+// Default footprints run large; front yards get the smallest, back yards a bit bigger.
+function sizeMultForYard(yardType: string): number {
+  return yardType === 'front' ? 0.6 : yardType === 'back' ? 0.85 : 0.75;
+}
+
 // ── Feature hints (placement guidance) ────────────────────────────────────────
 const FEAT_HINTS: Record<string, string> = {
-  seating: 'Close to the house for easy access, or at the far end to create a destination you walk toward.',
-  dining:  "Best close to the house and kitchen door — you'll be carrying food out here.",
-  cooking: 'Works as its own destination at the far end, or tucked into a corner as an evening gathering spot. Needs 10ft clearance from structures.',
+  seating: 'Place close to the house for easy access, or at the far end if your yard to create a destination.',
+  dining:  'Place this close to the house door to streamline serving and clean up.',
+  cooking: 'This works as its own destination at the far end, or tucked into a corner as an evening gathering spot.',
   water:   '', // set inline based on lawn amount
-  garden:  "Put these where they'll get the most sun — usually the edge furthest from the house and any large trees.",
-  storage: 'Tuck this into the least visible corner — usually behind a fence line or in the side yard.',
-  walkway: 'A clear path from the entrance to the main areas — keep it accessible and direct.',
-  trees:   'Consider placement for shade on the west and south sides for afternoon cooling.',
+  garden:  "Put these where plants will get the most sun - usually the open edge furthest from the house and out of any shade.",
+  storage: 'Tuck this into the least visible corner of your yard.',
+  lawn:    'Aim for a large, uninterrupted space for better usability and easier maintenance.',
 };
 
 const FEAT_ORDER = ['seating', 'dining', 'cooking', 'water', 'garden', 'storage', 'trees'];
@@ -62,19 +79,21 @@ type StepId = 'features' | 'walkways' | 'materials' | 'lawn' | 'review';
 const STEP_TITLE: Record<StepId, string> = {
   features:  'Place your features',
   walkways:  'Walkways',
-  materials: 'Ground material',
+  materials: 'Planting beds',
   lawn:      'Lawn',
   review:    'Review your plan',
 };
 
-type GroundMaterial = 'mulch' | 'rock';
+type GroundMaterial = 'mulch' | 'rock' | 'lawn';
 type BedType = 'planted' | 'unplanted';
+type GroundVariant = 'natural' | 'brown' | 'black' | 'river' | 'pea' | 'lava';
 
 interface PlacedBed {
   id:       string;
   label:    string;
   type:     BedType;
   material: GroundMaterial;
+  variant?: GroundVariant;
   shape:    'rect' | 'circle' | 'organic' | 'poly';
   xFt:      number;  // bounding-box origin (unused for poly)
   yFt:      number;
@@ -86,22 +105,78 @@ interface PlacedBed {
 const MATERIAL_COLOR: Record<GroundMaterial, string> = {
   mulch: '#8B6B4A',
   rock:  '#9A9A8C',
+  lawn:  '#8DAA6A',
 };
+
+// Each material offers a few visual variants; the color stands in for that
+// material on the plan (e.g. light brown for brown mulch).
+const GROUND_VARIANTS: Record<'mulch' | 'rock', { id: GroundVariant; label: string; color: string }[]> = {
+  mulch: [
+    { id: 'natural', label: 'Natural', color: '#C7B083' },
+    { id: 'brown',   label: 'Brown',   color: '#A6743F' },
+    { id: 'black',   label: 'Black',   color: '#4A443C' },
+  ],
+  rock: [
+    { id: 'river', label: 'River rocks', color: '#A3A69D' },
+    { id: 'pea',   label: 'Pea gravel',  color: '#C3BBA6' },
+    { id: 'lava',  label: 'Lava rock',   color: '#8A574B' },
+  ],
+};
+const VARIANT_COLOR: Record<GroundVariant, string> = {
+  natural: '#C7B083', brown: '#A6743F', black: '#4A443C',
+  river:   '#A3A69D', pea:   '#C3BBA6', lava:  '#8A574B',
+};
+const VARIANT_LABEL: Record<GroundVariant, string> = {
+  natural: 'Natural', brown: 'Brown', black: 'Black',
+  river:   'River rocks', pea: 'Pea gravel', lava: 'Lava rock',
+};
+const variantsFor = (m: GroundMaterial) => (m === 'mulch' || m === 'rock') ? GROUND_VARIANTS[m] : [];
+
+// Hardscape materials for built features (seating, dining, fire pit, utility).
+type FeatureMaterial = 'pavers' | 'concrete' | 'flagstone' | 'mulch' | 'gravel' | 'brick';
+const FEATURE_MATERIALS: { id: FeatureMaterial; label: string; color: string; price: string }[] = [
+  { id: 'mulch',     label: 'Mulch',     color: '#8B6B4A', price: '$'  },
+  { id: 'gravel',    label: 'Gravel',    color: '#B4AC9B', price: '$'  },
+  { id: 'flagstone', label: 'Flagstone', color: '#A7A096', price: '$'  },
+  { id: 'pavers',    label: 'Pavers',    color: '#B7AC9A', price: '$'  },
+  { id: 'concrete',  label: 'Concrete',  color: '#C2BEB5', price: '$$' },
+  { id: 'brick',     label: 'Brick',     color: '#9E5E48', price: '$$' },
+];
+const FEATURE_MATERIAL_COLOR: Record<FeatureMaterial, string> = {
+  pavers: '#B7AC9A', concrete: '#C2BEB5', flagstone: '#A7A096', mulch: '#8B6B4A', gravel: '#B4AC9B', brick: '#9E5E48',
+};
+// Features whose surface is a built/hardscape material the user can choose.
+const MATERIAL_FEATURES = new Set(['seating', 'dining', 'cooking', 'storage']);
 
 // ── Path style ─────────────────────────────────────────────────────────────────
 type PathStyle = 'straight' | 'winding';
+type PathMaterial = 'mulch' | 'gravel' | 'flagstone' | 'pavers' | 'concrete' | 'brick';
 
-interface PlacedPath {
-  id:      string;
-  label:   string;
-  startId: string; // zone id or 'door' or 'manual'
-  endId:   string;
-  pts:     [number, number][]; // [xFt, yFt]
-  style:   PathStyle;
-  widthFt: number;
+const PATH_MATERIALS: { id: PathMaterial; label: string; price: string }[] = [
+  { id: 'mulch',     label: 'Mulch',     price: '$'   },
+  { id: 'gravel',    label: 'Gravel',    price: '$'   },
+  { id: 'flagstone', label: 'Flagstone', price: '$$'  },
+  { id: 'pavers',    label: 'Pavers',    price: '$$'  },
+  { id: 'concrete',  label: 'Concrete',  price: '$$$' },
+  { id: 'brick',     label: 'Brick',     price: '$$$' },
+];
+// Flagstone/pavers read as a stepping path (~2 ft); loose or poured walkways want 3 ft.
+function pathWidthForMaterial(m: PathMaterial): number {
+  return (m === 'flagstone' || m === 'pavers') ? 2 : 3;
 }
 
-const PATH_COLOR = '#C4AD8C';
+interface PlacedPath {
+  id:        string;
+  label:     string;
+  startId:   string; // zone id or 'door' or 'manual'
+  endId:     string;
+  pts:       [number, number][]; // [xFt, yFt]
+  style:     PathStyle;
+  material:  PathMaterial;
+  widthFt:   number;
+}
+
+const PATH_COLOR = '#6E7681'; // slate — distinct from the warm feature palette
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 type ZoneShape = 'rect' | 'circle' | 'organic';
@@ -111,17 +186,20 @@ interface PlacedZone {
   key:   string;
   label: string;
   color: string;
+  material?: FeatureMaterial;  // chosen hardscape surface (built features only)
   shape: ZoneShape;
   xFt:   number;
   yFt:   number;
   wFt:   number;
   hFt:   number;
+  verts?: [number, number][];  // editable polygon (organic shapes); overrides bbox when present
 }
 
 interface CS {
   widthFt:  number;
   heightFt: number;
   toXY:     (lng: number, lat: number) => [number, number];
+  toLngLat: (x: number, y: number) => [number, number];
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -218,6 +296,7 @@ function buildCS(verts: [number, number][]): CS {
     widthFt:  (maxLng - minLng) * mLng * FT,
     heightFt: (maxLat - minLat) * mLat * FT,
     toXY:     (lng, lat) => [(lng - minLng) * mLng * FT, (maxLat - lat) * mLat * FT],
+    toLngLat: (x, y) => [minLng + x / (mLng * FT), maxLat - y / (mLat * FT)],
   };
 }
 
@@ -263,6 +342,133 @@ function organicPath(ctx: CanvasRenderingContext2D, cx: number, cy: number, rx: 
   ctx.closePath();
 }
 
+// ── Feet-space polygons (for geometric clipping so nothing overlaps) ─────────────
+type Ring = [number, number][];
+
+function organicRingFt(cx: number, cy: number, rx: number, ry: number, id: string): Ring {
+  const rng = seededRng(hashId(id));
+  const N = 9;
+  const pts: Ring = Array.from({ length: N }, (_, i) => {
+    const angle = (i / N) * Math.PI * 2 - Math.PI / 2;
+    const j = 0.78 + rng() * 0.44;
+    return [cx + Math.cos(angle) * rx * j, cy + Math.sin(angle) * ry * j];
+  });
+  const ring: Ring = [];
+  const STEPS = 8;
+  for (let i = 0; i < N; i++) {
+    const p0 = pts[(i - 1 + N) % N], p1 = pts[i], p2 = pts[(i + 1) % N], p3 = pts[(i + 2) % N];
+    const c1: [number, number] = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+    const c2: [number, number] = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+    for (let s = 0; s < STEPS; s++) {
+      const t = s / STEPS, u = 1 - t;
+      ring.push([
+        u*u*u*p1[0] + 3*u*u*t*c1[0] + 3*u*t*t*c2[0] + t*t*t*p2[0],
+        u*u*u*p1[1] + 3*u*u*t*c1[1] + 3*u*t*t*c2[1] + t*t*t*p2[1],
+      ]);
+    }
+  }
+  ring.push(ring[0]);
+  return ring;
+}
+
+// Ring for a rect/circle/organic/poly shape, in feet.
+function shapeRingFt(shape: string, xFt: number, yFt: number, wFt: number, hFt: number, id: string, verts?: [number, number][]): Ring {
+  if (verts && verts.length >= 3) {
+    const r: Ring = verts.map(v => [v[0], v[1]]);
+    r.push([verts[0][0], verts[0][1]]);
+    return r;
+  }
+  const cx = xFt + wFt / 2, cy = yFt + hFt / 2, rx = wFt / 2, ry = hFt / 2;
+  if (shape === 'circle') {
+    const N = 44, r: Ring = [];
+    for (let i = 0; i < N; i++) { const a = (i / N) * Math.PI * 2; r.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]); }
+    r.push(r[0]);
+    return r;
+  }
+  if (shape === 'organic') return organicRingFt(cx, cy, rx, ry, id);
+  return [[xFt, yFt], [xFt + wFt, yFt], [xFt + wFt, yFt + hFt], [xFt, yFt + hFt], [xFt, yFt]];
+}
+
+// Polygon (turf Feature) for a walkway: its centre-line buffered to its width, in feet.
+function pathPolyFt(pts: [number, number][], widthFt: number): turf.Feature<turf.Polygon | turf.MultiPolygon> | null {
+  if (pts.length < 2) return null;
+  const hw = Math.max(widthFt / 2, 0.75);
+  let acc: turf.Feature<turf.Polygon | turf.MultiPolygon> | null = null;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ax, ay] = pts[i], [bx, by] = pts[i + 1];
+    let dx = bx - ax, dy = by - ay; const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len * hw, ny = dx / len * hw;
+    const rect = turf.polygon([[[ax + nx, ay + ny], [bx + nx, by + ny], [bx - nx, by - ny], [ax - nx, ay - ny], [ax + nx, ay + ny]]]);
+    try { acc = acc ? (turf.union(acc, rect) as typeof acc) : rect; } catch { acc = acc ?? rect; }
+  }
+  return acc;
+}
+
+function ringBbox(ring: Ring): [number, number, number, number] {
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+  for (const [x, y] of ring) { if (x < minx) minx = x; if (y < miny) miny = y; if (x > maxx) maxx = x; if (y > maxy) maxy = y; }
+  return [minx, miny, maxx, maxy];
+}
+function bboxesOverlap(a: [number, number, number, number], b: [number, number, number, number]): boolean {
+  return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
+}
+function bboxGapFt(a: [number, number, number, number], b: [number, number, number, number]): number {
+  const dx = Math.max(a[0] - b[2], b[0] - a[2], 0);
+  const dy = Math.max(a[1] - b[3], b[1] - a[3], 0);
+  return Math.hypot(dx, dy);
+}
+function segPointDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  let t = l2 === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+// Closest point on a segment (with distance) — used for walkway vertex/edge editing.
+function segClosestPx(px: number, py: number, ax: number, ay: number, bx: number, by: number): { dist: number; cx: number; cy: number } {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  let t = l2 === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / l2;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * dx, cy = ay + t * dy;
+  return { dist: Math.hypot(px - cx, py - cy), cx, cy };
+}
+// Minimum distance between two polygon boundaries (feet).
+function ringsMinDist(A: Ring, B: Ring): number {
+  let min = Infinity;
+  for (const [px, py] of A) for (let i = 0; i < B.length - 1; i++) min = Math.min(min, segPointDist(px, py, B[i][0], B[i][1], B[i + 1][0], B[i + 1][1]));
+  for (const [px, py] of B) for (let i = 0; i < A.length - 1; i++) min = Math.min(min, segPointDist(px, py, A[i][0], A[i][1], A[i + 1][0], A[i + 1][1]));
+  return min;
+}
+function ringsOverlap(A: Ring, B: Ring): boolean {
+  for (const [x, y] of A) if (ptInPoly(x, y, B)) return true;
+  for (const [x, y] of B) if (ptInPoly(x, y, A)) return true;
+  return false;
+}
+// Planar area (ft²) of a turf Polygon/MultiPolygon, subtracting holes.
+function featureAreaFt(feat: turf.Feature<turf.Polygon | turf.MultiPolygon>): number {
+  const polys = feat.geometry.type === 'Polygon' ? [feat.geometry.coordinates] : feat.geometry.coordinates;
+  let total = 0;
+  for (const poly of polys) {
+    poly.forEach((ring, idx) => {
+      let a = 0;
+      for (let i = 0; i < ring.length - 1; i++) a += ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
+      total += (idx === 0 ? 1 : -1) * Math.abs(a / 2); // outer ring adds, holes subtract
+    });
+  }
+  return total;
+}
+// Outer rings of a turf Polygon/MultiPolygon (feet), for distance checks.
+function featureRings(feat: turf.Feature<turf.Polygon | turf.MultiPolygon>): Ring[] {
+  const polys = feat.geometry.type === 'Polygon' ? [feat.geometry.coordinates] : feat.geometry.coordinates;
+  return polys.map(poly => poly[0] as Ring);
+}
+// Ensure a ring is closed (first === last) and valid for turf.polygon.
+function closeRingPts(pts: Ring): Ring | null {
+  if (!pts || pts.length < 3) return null;
+  const f = pts[0], l = pts[pts.length - 1];
+  const closed: Ring = (f[0] === l[0] && f[1] === l[1]) ? pts.slice() : [...pts, [f[0], f[1]]];
+  return closed.length >= 4 ? closed : null;
+}
+
 // ── Component ──────────────────────────────────────────────────────────────────
 export default function DiyPlacementPage() {
   const navigate = useNavigate();
@@ -271,6 +477,11 @@ export default function DiyPlacementPage() {
   // ── Data ────────────────────────────────────────────────────────────────────
   const saved = useMemo(() => { try { return JSON.parse(localStorage.getItem('diyBoundaryFinal') || '{}'); } catch { return {}; } }, []);
   const prefs = useMemo(() => { try { return JSON.parse(localStorage.getItem('userPreferences')  || '{}'); } catch { return {}; } }, []);
+  const siteContext = useMemo(() => { try { return JSON.parse(localStorage.getItem('siteContext') || '{}'); } catch { return {}; } }, []);
+  // Previously-saved plan, so returning from the review screen restores the layout.
+  const savedPlan = useMemo(() => { try { return JSON.parse(localStorage.getItem('diyPlacementPlan') || '{}'); } catch { return {}; } }, []);
+  const yardType: string    = siteContext.yard_type ?? prefs.yard_type ?? '';
+  const designStyle: string = prefs.style ?? '';
 
   const boundary: [number, number][] = useMemo(() => saved.boundary          ?? [], [saved]);
   const existing: ConfirmedFeature[] = useMemo(() => saved.confirmedFeatures ?? [], [saved]);
@@ -288,6 +499,32 @@ export default function DiyPlacementPage() {
       .map(f => f.vertices.map(v => cs.toXY(v[0], v[1])) as [number, number][]);
   }, [cs, existing]);
 
+  const boundaryAreaFt = useMemo(() => {
+    if (boundaryFt.length < 3) return 0;
+    let area = 0;
+    for (let i = 0; i < boundaryFt.length; i++) {
+      const j = (i + 1) % boundaryFt.length;
+      area += boundaryFt[i][0] * boundaryFt[j][1] - boundaryFt[j][0] * boundaryFt[i][1];
+    }
+    return Math.round(Math.abs(area / 2));
+  }, [boundaryFt]);
+
+  // Area (ft²) of existing features that take up usable ground — everything except trees
+  // (you can still plant/lawn under a tree canopy). Subtracted from the project area when
+  // sizing the default lawn.
+  const existingNonTreeAreaFt = useMemo(() => {
+    if (!cs) return 0;
+    let total = 0;
+    for (const f of existing) {
+      if (!f.keep || f.type === 'tree' || f.vertices.length < 3) continue;
+      const pts = f.vertices.map(v => cs.toXY(v[0], v[1]));
+      let a = 0;
+      for (let i = 0; i < pts.length; i++) { const j = (i + 1) % pts.length; a += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1]; }
+      total += Math.abs(a / 2);
+    }
+    return total;
+  }, [existing, cs]);
+
   const { isLoaded } = useJsApiLoader({ id: 'google-map-script', googleMapsApiKey: GOOGLE_MAPS_KEY });
 
   const mapCenter = useMemo(() => {
@@ -298,14 +535,33 @@ export default function DiyPlacementPage() {
     };
   }, [boundary]);
 
-  // Feature items to show in the features step (in order, filtered to user's selections)
-  const featItems = useMemo(() =>
-    FEAT_ORDER
+  // Feature items to show in the features step (in order, filtered to user's selections).
+  // Lawn is included as a feature when the user wanted some/lot of it; its default size
+  // is the project area × the lawn target, shaped to the yard's proportions.
+  const featItems = useMemo(() => {
+    const mult = sizeMultForYard(yardType);
+    const items = FEAT_ORDER
       .filter(k => featKeys.includes(k))
       .map(k => OPTIONAL_TOOLS[k])
-      .filter(Boolean) as ToolbarItem[],
-    [featKeys],
-  );
+      .filter(Boolean)
+      .map(base => ({
+        ...base,
+        shape:    shapeForStyle(base.key, designStyle),
+        defaultW: Math.max(3, Math.round(base.defaultW * mult)),
+        defaultH: Math.max(3, Math.round(base.defaultH * mult)),
+      })) as ToolbarItem[];
+    if (lawnAmount !== 'none' && boundaryAreaFt > 0 && cs) {
+      const ar   = cs.widthFt / cs.heightFt;
+      // Lawn target × usable project area (total minus non-tree existing features).
+      const area = lawnTarget * Math.max(0, boundaryAreaFt - existingNonTreeAreaFt);
+      items.push({
+        key: 'lawn', label: 'Lawn', color: '#8DAA6A', shape: shapeForStyle('lawn', designStyle),
+        defaultW: Math.max(6, Math.round(Math.sqrt(area * ar))),
+        defaultH: Math.max(6, Math.round(Math.sqrt(area / ar))),
+      });
+    }
+    return items;
+  }, [featKeys, lawnAmount, lawnTarget, boundaryAreaFt, existingNonTreeAreaFt, cs, yardType, designStyle]);
 
   // ── Path state (declared early — used by draw + handlers below) ─────────────
   const doorPoint: [number, number] | null = useMemo(() => saved.doorPoint ?? null, [saved]);
@@ -313,16 +569,19 @@ export default function DiyPlacementPage() {
     const s = prefs.style ?? '';
     return (s === 'natural_wild' || s === 'traditional') ? 'winding' : 'straight';
   }, [prefs]);
-  const [paths,           setPaths]           = useState<PlacedPath[]>([]);
+  const [paths,           setPaths]           = useState<PlacedPath[]>(() => Array.isArray(savedPlan.paths) ? savedPlan.paths : []);
   const [globalPathStyle, setGlobalPathStyle] = useState<PathStyle>(defaultPathStyle);
-  const [pathDrawMode,    setPathDrawMode]    = useState<'idle' | 'picking-start' | 'picking-end'>('idle');
+  const [globalPathMaterial, setGlobalPathMaterial] = useState<PathMaterial>('gravel');
+  const [pathDrawMode,    setPathDrawMode]    = useState<'idle' | 'choosing-style' | 'choosing-material' | 'picking-start' | 'picking-end'>('idle');
   const pathDrawStart = useRef<[number, number] | null>(null);
   const [pathConnectStart, setPathConnectStart] = useState<{ id: string; label: string; pt: [number, number] } | null>(null);
 
   // ── Materials state ───────────────────────────────────────────────────────────
-  const [defaultMaterial, setDefaultMaterial] = useState<GroundMaterial>('mulch');
-  const [placedBeds,      setPlacedBeds]      = useState<PlacedBed[]>([]);
-  const [addingBed,       setAddingBed]       = useState<{ step: 'type' | 'material' | 'draw'; type?: BedType; material?: GroundMaterial } | null>(null);
+  const [defaultMaterial, setDefaultMaterial] = useState<GroundMaterial | null>(() => savedPlan.primary?.material ?? null);
+  const [defaultVariant,  setDefaultVariant]  = useState<GroundVariant | null>(() => savedPlan.primary?.variant ?? null);
+  const [placedBeds,      setPlacedBeds]      = useState<PlacedBed[]>(() => Array.isArray(savedPlan.beds) ? savedPlan.beds : []);
+  const [addingBed,       setAddingBed]       = useState<{ step: 'type' | 'material' | 'variant' | 'draw'; type?: BedType; material?: GroundMaterial; variant?: GroundVariant } | null>(null);
+  const [recTip,          setRecTip]          = useState(false); // "Recommended" hover tooltip
 
   const generatePathPts = useCallback((
     startFt: [number, number],
@@ -364,24 +623,61 @@ export default function DiyPlacementPage() {
   const mapRef       = useRef<google.maps.Map | null>(null);
   const [cssSize, setCssSize] = useState({ w: 900, h: 600 });
 
-  const scale = useMemo(() => {
+  const fitScale = useMemo(() => {
     if (!cs) return 5;
     return Math.min((cssSize.w - PAD * 2) / cs.widthFt, (cssSize.h - PAD * 2) / cs.heightFt);
   }, [cs, cssSize]);
 
+  // Affine (px-per-foot + pixel origin) read straight from the live map projection, so the
+  // canvas renders exactly onto the satellite's pixels — no drift between map & canvas.
+  const overlayRef = useRef<google.maps.OverlayView | null>(null);
+  const [mapAffine, setMapAffine] = useState<{ scale: number; ox: number; oy: number } | null>(null);
+  const recomputeAffine = useCallback(() => {
+    const ov = overlayRef.current, c = csRef.current;
+    if (!ov || !c) return;
+    const proj = ov.getProjection?.();
+    if (!proj) return;
+    const toPt = (xFt: number, yFt: number) => {
+      const [lng, lat] = c.toLngLat(xFt, yFt);
+      return proj.fromLatLngToContainerPixel(new google.maps.LatLng(lat, lng));
+    };
+    const a = toPt(0, 0), bx = toPt(c.widthFt, 0), by = toPt(0, c.heightFt);
+    if (!a || !bx || !by) return;
+    const sx = Math.hypot(bx.x - a.x, bx.y - a.y) / Math.max(c.widthFt, 1e-6);
+    const sy = Math.hypot(by.x - a.x, by.y - a.y) / Math.max(c.heightFt, 1e-6);
+    const scale = (sx + sy) / 2;
+    setMapAffine(prev =>
+      prev && Math.abs(prev.scale - scale) < 0.002 && Math.abs(prev.ox - a.x) < 0.5 && Math.abs(prev.oy - a.y) < 0.5
+        ? prev : { scale, ox: a.x, oy: a.y });
+  }, []);
+
+  const scale = mapAffine ? mapAffine.scale : fitScale;
+
+  // Frame the satellite so the yard fills the view (alignment then comes from the projection).
+  const mapView = useMemo(() => {
+    if (boundary.length < 3 || !cs) return { center: mapCenter, zoom: 20 };
+    const lngs = boundary.map(v => v[0]), lats = boundary.map(v => v[1]);
+    const centerLng = (Math.min(...lngs) + Math.max(...lngs)) / 2;
+    const centerLat = (Math.min(...lats) + Math.max(...lats)) / 2;
+    const zoom = Math.log2(156543.03392 * Math.cos(centerLat * Math.PI / 180) * fitScale * 3.28084);
+    return { center: { lat: centerLat, lng: centerLng }, zoom: Math.min(Math.max(zoom, 1), 22.9) };
+  }, [boundary, cs, fitScale, mapCenter]);
+
   const ftToPx = useCallback((xFt: number, yFt: number): [number, number] => {
+    if (mapAffine) return [mapAffine.ox + xFt * mapAffine.scale, mapAffine.oy + yFt * mapAffine.scale];
     if (!cs) return [0, 0];
-    const ox = (cssSize.w - cs.widthFt  * scale) / 2;
-    const oy = (cssSize.h - cs.heightFt * scale) / 2;
-    return [ox + xFt * scale, oy + yFt * scale];
-  }, [cs, scale, cssSize]);
+    const ox = (cssSize.w - cs.widthFt  * fitScale) / 2;
+    const oy = (cssSize.h - cs.heightFt * fitScale) / 2;
+    return [ox + xFt * fitScale, oy + yFt * fitScale];
+  }, [mapAffine, cs, fitScale, cssSize]);
 
   const pxToFt = useCallback((cx: number, cy: number): [number, number] => {
+    if (mapAffine) return [(cx - mapAffine.ox) / mapAffine.scale, (cy - mapAffine.oy) / mapAffine.scale];
     if (!cs) return [0, 0];
-    const ox = (cssSize.w - cs.widthFt  * scale) / 2;
-    const oy = (cssSize.h - cs.heightFt * scale) / 2;
-    return [(cx - ox) / scale, (cy - oy) / scale];
-  }, [cs, scale, cssSize]);
+    const ox = (cssSize.w - cs.widthFt  * fitScale) / 2;
+    const oy = (cssSize.h - cs.heightFt * fitScale) / 2;
+    return [(cx - ox) / fitScale, (cy - oy) / fitScale];
+  }, [mapAffine, cs, fitScale, cssSize]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -395,8 +691,13 @@ export default function DiyPlacementPage() {
   }, []);
 
   // ── Zones + selection ───────────────────────────────────────────────────────
-  const [placedZones,    setPlacedZones]    = useState<PlacedZone[]>([]);
+  const [placedZones,    setPlacedZones]    = useState<PlacedZone[]>(() => Array.isArray(savedPlan.zones) ? savedPlan.zones : []);
   const [selectedId,     setSelectedId]     = useState<string | null>(null);
+  // The feature row the user has highlighted in the list — its hint shows atop the map.
+  const [activeToolKey,  setActiveToolKey]  = useState<string | null>(null);
+  // Features the user has skipped (the "✕") — counts as decided, like a delete on /boundary.
+  const [skippedKeys,    setSkippedKeys]    = useState<Set<string>>(new Set());
+  const [showDeleted,    setShowDeleted]    = useState(false);
   const [selectedPathId, setSelectedPathId] = useState<string | null>(null);
   const [selectedBedId,  setSelectedBedId]  = useState<string | null>(null);
 
@@ -410,7 +711,7 @@ export default function DiyPlacementPage() {
   const pathsRef       = useRef<PlacedPath[]>([]);
   const bedsRef        = useRef<PlacedBed[]>([]);
   const selBedRef      = useRef<string | null>(null);
-  const addingBedRef      = useRef<{ step: 'type' | 'material' | 'draw'; type?: BedType; material?: GroundMaterial } | null>(null);
+  const addingBedRef      = useRef<{ step: 'type' | 'material' | 'variant' | 'draw'; type?: BedType; material?: GroundMaterial; variant?: GroundVariant } | null>(null);
   const bedDrawVertsRef   = useRef<[number, number][]>([]);
   const bedDrawCursorRef  = useRef<[number, number] | null>(null);
   const isDblClickRef     = useRef(false);
@@ -418,6 +719,8 @@ export default function DiyPlacementPage() {
   const obstacleFtRef  = useRef<[number, number][][]>([]);
   const doorPointRef   = useRef<[number, number] | null>(null);
   const csRef          = useRef<CS | null>(null);
+  const defaultVariantRef = useRef<GroundVariant | null>(null);
+  useEffect(() => { defaultVariantRef.current = defaultVariant; }, [defaultVariant]);
 
   useEffect(() => { zonesRef.current    = placedZones; }, [placedZones]);
   useEffect(() => { selRef.current      = selectedId;  }, [selectedId]);
@@ -452,35 +755,165 @@ export default function DiyPlacementPage() {
     const selId    = selRef.current;
     const curPaths = pathsRef.current;
 
-    const appendZonePath = (zone: PlacedZone) => {
-      const [px, py] = ftToPxRef.current(zone.xFt, zone.yFt);
-      const pw = zone.wFt * scaleRef.current, ph = zone.hFt * scaleRef.current;
-      if (zone.shape === 'circle') {
-        ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
-      } else if (zone.shape === 'organic') {
-        organicPath(ctx, px + pw / 2, py + ph / 2, pw / 2, ph / 2, zone.id);
-      } else {
-        rrPath(ctx, px, py, pw, ph, 7);
+    // ── Clipped, non-overlapping shapes ───────────────────────────────────────
+    // Filled areas (lawn → beds → features, bottom→top) are each clipped by the ones
+    // above them AND by every walkway, so nothing overlaps. Walkways draw on top.
+    type Renderable = {
+      poly: turf.Feature<turf.Polygon | turf.MultiPolygon>;
+      bbox: [number, number, number, number];
+      fill: string; stroke: string; lineWidth: number;
+      label: string | null; labelMinPx: number;
+      center: [number, number]; handle: boolean;
+    };
+    const renderables: Renderable[] = [];
+
+    const pushZone = (z: PlacedZone) => {
+      if (!z.verts && (z.wFt <= 0 || z.hFt <= 0)) return;
+      try {
+        const poly = turf.polygon([shapeRingFt(z.shape, z.xFt, z.yFt, z.wFt, z.hFt, z.id, z.verts)]);
+        const isSel = z.id === selId;
+        const zc = z.material ? FEATURE_MATERIAL_COLOR[z.material] : z.color;
+        const bb = turf.bbox(poly) as [number, number, number, number];
+        renderables.push({
+          poly, bbox: bb,
+          fill: zc + (isSel ? 'F2' : 'E6'), stroke: isSel ? '#FFFFFF' : zc, lineWidth: isSel ? 2.5 : 1.5,
+          label: z.label, labelMinPx: 40, center: [(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2], handle: isSel && !z.verts,
+        });
+      } catch { /* skip degenerate */ }
+    };
+    const pushBed = (b: PlacedBed) => {
+      try {
+        const poly = turf.polygon([shapeRingFt(b.shape, b.xFt, b.yFt, b.wFt, b.hFt, b.id, b.verts)]);
+        const isSel = b.id === selBedRef.current;
+        const color = b.variant ? VARIANT_COLOR[b.variant] : MATERIAL_COLOR[b.material];
+        const c = turf.centroid(poly).geometry.coordinates as [number, number];
+        renderables.push({
+          poly, bbox: turf.bbox(poly) as [number, number, number, number],
+          fill: color + (isSel ? 'CC' : '88'), stroke: color, lineWidth: isSel ? 2 : 1,
+          label: b.label, labelMinPx: 36, center: c, handle: isSel && b.shape !== 'poly',
+        });
+      } catch { /* skip */ }
+    };
+
+    for (const z of zones)           if (z.key === 'lawn') pushZone(z);
+    for (const b of bedsRef.current) pushBed(b);
+    for (const z of zones)           if (z.key !== 'lawn') pushZone(z);
+
+    // Walkway footprints — clip obstacles for every filled area (walkways draw on top).
+    const pathObstacles = curPaths
+      .map(p => pathPolyFt(p.pts, p.widthFt))
+      .filter((p): p is turf.Feature<turf.Polygon | turf.MultiPolygon> => !!p)
+      .map(poly => ({ poly, bbox: turf.bbox(poly) as [number, number, number, number] }));
+
+    const drawFeature = (feat: turf.Feature<turf.Polygon | turf.MultiPolygon>, fill: string, stroke: string, lineWidth: number) => {
+      const polys = feat.geometry.type === 'Polygon' ? [feat.geometry.coordinates] : feat.geometry.coordinates;
+      for (const poly of polys) {
+        ctx.beginPath();
+        for (const ring of poly) {
+          ring.forEach(([x, y], k) => {
+            const [px, py] = ftToPxRef.current(x, y);
+            if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+          });
+          ctx.closePath();
+        }
+        ctx.fillStyle = fill; ctx.fill('evenodd');
+        ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth; ctx.stroke();
       }
     };
 
-    // Draw paths beneath zones
+    // The project boundary + existing features (house, detected walkways/hardscape)
+    // clip every placed shape, so features stay inside the yard and wrap around them.
+    const bdyFt = boundaryFtRef.current;
+    let clipBdy: turf.Feature<turf.Polygon | turf.MultiPolygon> | null = null;
+    const bdyClosed = closeRingPts(bdyFt);
+    if (bdyClosed) { try { clipBdy = turf.polygon([bdyClosed]); } catch { clipBdy = null; } }
+    const clipObs = obstacleFtRef.current
+      .map(v => { const r = closeRingPts(v); if (!r) return null; try { const poly = turf.polygon([r]); return { poly, bbox: turf.bbox(poly) as [number, number, number, number] }; } catch { return null; } })
+      .filter((o): o is { poly: turf.Feature<turf.Polygon | turf.MultiPolygon>; bbox: [number, number, number, number] } => !!o);
+
+    // ── Primary planting-bed fill ─────────────────────────────────────────────
+    // The chosen ground material covers all the leftover (non-feature) area:
+    // boundary minus existing structures, every placed feature/lawn/bed, and walkways.
+    if (defaultVariantRef.current && clipBdy) {
+      let ground: turf.Feature<turf.Polygon | turf.MultiPolygon> | null = clipBdy;
+      for (const ob of clipObs)        { if (!ground) break; try { ground = turf.difference(ground, ob.poly) as typeof ground; } catch { /* keep */ } }
+      for (const r of renderables)     { if (!ground) break; try { ground = turf.difference(ground, r.poly)  as typeof ground; } catch { /* keep */ } }
+      for (const ob of pathObstacles)  { if (!ground) break; try { ground = turf.difference(ground, ob.poly) as typeof ground; } catch { /* keep */ } }
+      if (ground) drawFeature(ground, VARIANT_COLOR[defaultVariantRef.current] + 'D9', VARIANT_COLOR[defaultVariantRef.current], 1);
+    }
+
+    for (let i = 0; i < renderables.length; i++) {
+      const r = renderables[i];
+      let geom: turf.Feature<turf.Polygon | turf.MultiPolygon> | null = r.poly;
+      if (clipBdy) { try { geom = turf.intersect(geom, clipBdy) as typeof geom; } catch { /* keep */ } }
+      for (const ob of clipObs) {
+        if (!geom) break;
+        if (!bboxesOverlap(r.bbox, ob.bbox)) continue;
+        try { geom = turf.difference(geom, ob.poly) as typeof geom; } catch { /* keep */ }
+      }
+      for (let j = i + 1; j < renderables.length && geom; j++) {
+        if (!bboxesOverlap(r.bbox, renderables[j].bbox)) continue;
+        try { geom = turf.difference(geom, renderables[j].poly) as typeof geom; } catch { /* keep */ }
+      }
+      for (const ob of pathObstacles) {
+        if (!geom) break;
+        if (!bboxesOverlap(r.bbox, ob.bbox)) continue;
+        try { geom = turf.difference(geom, ob.poly) as typeof geom; } catch { /* keep */ }
+      }
+      if (!geom) continue;
+
+      ctx.save();
+      drawFeature(geom, r.fill, r.stroke, r.lineWidth);
+      ctx.restore();
+
+      const [cpx, cpy] = ftToPxRef.current(r.center[0], r.center[1]);
+      const pw = (r.bbox[2] - r.bbox[0]) * scaleRef.current;
+      const ph = (r.bbox[3] - r.bbox[1]) * scaleRef.current;
+      if (r.label && pw > r.labelMinPx && ph > 18) {
+        ctx.save();
+        const fs = Math.max(8, Math.min(12, pw / 9));
+        ctx.fillStyle = '#FFFFFF'; ctx.font = `600 ${fs}px ${IT}`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 3;
+        ctx.fillText(r.label.toUpperCase(), cpx, cpy);
+        ctx.restore();
+      }
+
+      if (r.handle) {
+        const [hx, hy] = ftToPxRef.current(r.bbox[2], r.bbox[3]);
+        ctx.save();
+        ctx.fillStyle = 'white'; ctx.strokeStyle = r.stroke; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.rect(hx - 7, hy - 7, 14, 14);
+        ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Walkways draw on top of the filled areas, filling the gaps they carved out.
+    // They're clipped to the project boundary (so they can't run past the yard) but
+    // not to other features — a walkway crosses freely over what it meets.
+    const bdyClip = boundaryFtRef.current;
     for (const path of curPaths) {
       if (path.pts.length < 2) continue;
       const pxPts    = path.pts.map(([xFt, yFt]) => ftToPxRef.current(xFt, yFt));
       const isSelPth = path.id === selectedPathIdRef.current;
       ctx.save();
-      ctx.strokeStyle = isSelPth ? '#8C6B44' : PATH_COLOR;
-      ctx.lineWidth   = Math.max(isSelPth ? 5 : 2, path.widthFt * scaleRef.current);
+      if (bdyClip.length >= 3) {
+        ctx.beginPath();
+        bdyClip.forEach(([x, y], i) => { const [px, py] = ftToPxRef.current(x, y); if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); });
+        ctx.closePath();
+        ctx.clip();
+      }
+      ctx.strokeStyle = isSelPth ? '#3F454D' : PATH_COLOR;
+      ctx.lineWidth   = Math.max(2, path.widthFt * scaleRef.current); // true width, to-scale
       ctx.lineCap     = 'round';
       ctx.lineJoin    = 'round';
-      ctx.globalAlpha = isSelPth ? 1 : 0.85;
+      ctx.globalAlpha = isSelPth ? 1 : 0.9;
       ctx.beginPath();
       ctx.moveTo(pxPts[0][0], pxPts[0][1]);
       if (path.style === 'straight' || pxPts.length <= 2) {
         for (let i = 1; i < pxPts.length; i++) ctx.lineTo(pxPts[i][0], pxPts[i][1]);
       } else {
-        // Catmull-Rom through pts
         for (let i = 0; i < pxPts.length - 1; i++) {
           const p0 = pxPts[Math.max(i - 1, 0)];
           const p1 = pxPts[i], p2 = pxPts[i + 1];
@@ -496,94 +929,40 @@ export default function DiyPlacementPage() {
       ctx.restore();
     }
 
-    // Draw beds beneath zones
-    for (const bed of bedsRef.current) {
-      const isSel  = bed.id === selBedRef.current;
-      const color  = MATERIAL_COLOR[bed.material];
+    // Editable vertex handles for the selected organic zone.
+    const selZone = zones.find(z => z.id === selId);
+    if (selZone?.verts && selZone.verts.length >= 3) {
       ctx.save();
-      ctx.beginPath();
-
-      if (bed.shape === 'poly' && bed.verts && bed.verts.length >= 3) {
-        const pxV = bed.verts.map(v => ftToPxRef.current(v[0], v[1]));
-        ctx.moveTo(pxV[0][0], pxV[0][1]);
-        for (let i = 1; i < pxV.length; i++) ctx.lineTo(pxV[i][0], pxV[i][1]);
-        ctx.closePath();
-        ctx.fillStyle   = color + (isSel ? 'CC' : '77');
-        ctx.strokeStyle = color;
-        ctx.lineWidth   = isSel ? 2 : 1;
-        if (isSel) ctx.setLineDash([5, 4]);
-        ctx.fill(); ctx.stroke();
-        ctx.setLineDash([]);
-        // centroid label
-        const cx = pxV.reduce((s, p) => s + p[0], 0) / pxV.length;
-        const cy = pxV.reduce((s, p) => s + p[1], 0) / pxV.length;
-        ctx.fillStyle = 'rgba(255,255,255,0.9)';
-        ctx.font = `500 10px ${IT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText(bed.label.toUpperCase(), cx, cy);
-      } else {
-        const [px, py] = ftToPxRef.current(bed.xFt, bed.yFt);
-        const pw = bed.wFt * scaleRef.current, ph = bed.hFt * scaleRef.current;
-        if (bed.shape === 'circle') {
-          ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
-        } else if (bed.shape === 'organic') {
-          organicPath(ctx, px + pw / 2, py + ph / 2, pw / 2, ph / 2, bed.id);
-        } else {
-          rrPath(ctx, px, py, pw, ph, 5);
-        }
-        ctx.fillStyle   = color + (isSel ? 'CC' : '77');
-        ctx.strokeStyle = color;
-        ctx.lineWidth   = isSel ? 2 : 1;
-        if (isSel) ctx.setLineDash([5, 4]);
-        ctx.fill(); ctx.stroke();
-        ctx.setLineDash([]);
-        if (pw > 36 && ph > 18) {
-          ctx.fillStyle = 'rgba(255,255,255,0.9)';
-          ctx.font = `500 ${Math.max(8, Math.min(11, pw / 10))}px ${IT}`;
-          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-          ctx.fillText(bed.label.toUpperCase(), px + pw / 2, py + ph / 2);
-        }
-        if (isSel) {
-          ctx.fillStyle = 'white'; ctx.strokeStyle = color; ctx.lineWidth = 2;
-          ctx.beginPath(); ctx.rect(px + pw - 7, py + ph - 7, 14, 14);
-          ctx.fill(); ctx.stroke();
-        }
+      for (const [vx, vy] of selZone.verts) {
+        const [hx, hy] = ftToPxRef.current(vx, vy);
+        ctx.beginPath(); ctx.arc(hx, hy, 5, 0, Math.PI * 2);
+        ctx.fillStyle = 'white'; ctx.fill();
+        ctx.strokeStyle = selZone.color; ctx.lineWidth = 2; ctx.stroke();
       }
       ctx.restore();
     }
 
-    for (const zone of zones) {
-      const [px, py] = ftToPxRef.current(zone.xFt, zone.yFt);
-      const pw = zone.wFt * scaleRef.current, ph = zone.hFt * scaleRef.current;
-      const isSel = zone.id === selId;
-
+    // Editable vertex handles for the selected walkway.
+    const selPathDraw = curPaths.find(p => p.id === selectedPathIdRef.current);
+    if (selPathDraw && selPathDraw.pts.length >= 2) {
       ctx.save();
-      ctx.beginPath();
-      appendZonePath(zone);
-      ctx.strokeStyle = isSel ? zone.color : zone.color + 'BB';
-      ctx.lineWidth   = isSel ? 2 : 1.5;
-      if (isSel) ctx.setLineDash([6, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      if (pw > 40 && ph > 22) {
-        const fs = Math.max(8, Math.min(12, pw / 9));
-        ctx.fillStyle    = zone.color + 'CC';
-        ctx.font         = `500 ${fs}px ${IT}`;
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(zone.label.toUpperCase(), px + pw / 2, py + ph / 2);
+      for (const [vx, vy] of selPathDraw.pts) {
+        const [hx, hy] = ftToPxRef.current(vx, vy);
+        ctx.beginPath(); ctx.arc(hx, hy, 5, 0, Math.PI * 2);
+        ctx.fillStyle = 'white'; ctx.fill();
+        ctx.strokeStyle = '#3F454D'; ctx.lineWidth = 2; ctx.stroke();
       }
       ctx.restore();
+    }
 
-      if (isSel) {
-        ctx.save();
-        ctx.fillStyle   = 'white';
-        ctx.strokeStyle = zone.color;
-        ctx.lineWidth   = 2;
-        ctx.beginPath(); ctx.rect(px + pw - 7, py + ph - 7, 14, 14);
-        ctx.fill(); ctx.stroke();
-        ctx.restore();
-      }
+    // Walkway draw — show the first point as it's placed (project-area boundary style).
+    if (pathDrawStart.current) {
+      const [hx, hy] = ftToPxRef.current(pathDrawStart.current[0], pathDrawStart.current[1]);
+      ctx.save();
+      ctx.beginPath(); ctx.arc(hx, hy, 6, 0, Math.PI * 2);
+      ctx.fillStyle = 'white'; ctx.fill();
+      ctx.strokeStyle = '#2F6B4F'; ctx.lineWidth = 2.5; ctx.stroke();
+      ctx.restore();
     }
 
     const ghost = ghostRef.current;
@@ -657,16 +1036,41 @@ export default function DiyPlacementPage() {
     draw();
   }, [cssSize, draw]);
 
-  useEffect(() => { draw(); }, [draw, placedZones, selectedId, paths, selectedPathId, placedBeds, selectedBedId]);
+  useEffect(() => { draw(); }, [draw, placedZones, selectedId, paths, selectedPathId, placedBeds, selectedBedId, boundaryFt, obstacleFt, mapAffine, defaultVariant]);
+
+  // Persist the plan so the review screen (a separate route) can summarize and draw it.
+  // We bake each shape's polygon ring (ft coords) so the review page can render a plan
+  // view without re-implementing the shape/seed logic.
+  useEffect(() => {
+    try {
+      const ring = (s: { shape: string; xFt: number; yFt: number; wFt: number; hFt: number; id: string; verts?: [number, number][] }) =>
+        shapeRingFt(s.shape, s.xFt, s.yFt, s.wFt, s.hFt, s.id, s.verts);
+      localStorage.setItem('diyPlacementPlan', JSON.stringify({
+        zones: placedZones.map(z => ({ ...z, ring: ring(z) })),
+        beds:  placedBeds.map(b => ({ ...b, ring: ring(b) })),
+        paths,
+        primary: { material: defaultMaterial, variant: defaultVariant },
+        boundary:  boundaryFt,
+        obstacles: obstacleFt,
+        projectAreaFt: boundaryAreaFt,
+        primaryGroundAreaFt,
+        address: (siteContext && siteContext.address) || '',
+      }));
+    } catch { /* ignore quota / serialization issues */ }
+  }, [placedZones, placedBeds, paths, defaultMaterial, defaultVariant, boundaryFt, obstacleFt, siteContext]);
 
   // ── Drag ref ─────────────────────────────────────────────────────────────────
   const dragRef = useRef<{
-    kind:    'move' | 'resize';
+    kind:    'move' | 'resize' | 'vertex';
     zoneId:  string;
     startMx: number; startMy: number;
     origX:   number; origY:   number;
     origW:   number; origH:   number;
+    vertIdx?:   number;
+    origVerts?: [number, number][];
   } | null>(null);
+
+  const pathDragRef = useRef<{ pathId: string; vertIdx: number } | null>(null);
 
   const bedDragRef = useRef<{
     kind:      'move' | 'resize';
@@ -678,19 +1082,55 @@ export default function DiyPlacementPage() {
   } | null>(null);
 
   // ── Hit test ─────────────────────────────────────────────────────────────────
-  const hitTest = useCallback((mx: number, my: number) => {
+  const hitTest = useCallback((mx: number, my: number): {
+    zone: PlacedZone; part: 'move' | 'resize' | 'vertex' | 'edge'; vertIdx?: number; edgeIdx?: number; ptFt?: [number, number];
+  } | null => {
     const zones = zonesRef.current;
     const sel   = selRef.current;
+    const segClosest = (px: number, py: number, ax: number, ay: number, bx: number, by: number) => {
+      const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+      let t = l2 === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / l2; t = Math.max(0, Math.min(1, t));
+      const cx = ax + t * dx, cy = ay + t * dy;
+      return { dist: Math.hypot(px - cx, py - cy), cx, cy };
+    };
     for (let i = zones.length - 1; i >= 0; i--) {
-      const z        = zones[i];
+      const z = zones[i];
+
+      // Editable polygon zones (organic): vertices and edges are interactive when selected.
+      if (z.verts && z.verts.length >= 3) {
+        if (z.id === sel) {
+          for (let v = 0; v < z.verts.length; v++) {
+            const [vx, vy] = ftToPxRef.current(z.verts[v][0], z.verts[v][1]);
+            if (Math.hypot(mx - vx, my - vy) <= 9) return { zone: z, part: 'vertex', vertIdx: v };
+          }
+          for (let e = 0; e < z.verts.length; e++) {
+            const a = z.verts[e], b = z.verts[(e + 1) % z.verts.length];
+            const [ax, ay] = ftToPxRef.current(a[0], a[1]);
+            const [bx, by] = ftToPxRef.current(b[0], b[1]);
+            const c = segClosest(mx, my, ax, ay, bx, by);
+            if (c.dist <= 7) return { zone: z, part: 'edge', edgeIdx: e, ptFt: pxToFtRef.current(c.cx, c.cy) };
+          }
+        }
+        const [fx, fy] = pxToFtRef.current(mx, my);
+        if (ptInPoly(fx, fy, z.verts)) return { zone: z, part: 'move' };
+        // Near the outline (so an unselected organic zone can be selected by its edge).
+        for (let e = 0; e < z.verts.length; e++) {
+          const a = z.verts[e], b = z.verts[(e + 1) % z.verts.length];
+          const [ax, ay] = ftToPxRef.current(a[0], a[1]);
+          const [bx, by] = ftToPxRef.current(b[0], b[1]);
+          if (segClosest(mx, my, ax, ay, bx, by).dist <= 7) return { zone: z, part: 'move' };
+        }
+        continue;
+      }
+
       const [px, py] = ftToPxRef.current(z.xFt, z.yFt);
       const pw = z.wFt * scaleRef.current, ph = z.hFt * scaleRef.current;
       if (z.id === sel) {
         if (mx >= px + pw - 13 && mx <= px + pw + 5 && my >= py + ph - 13 && my <= py + ph + 5)
-          return { zone: z, part: 'resize' as const };
+          return { zone: z, part: 'resize' };
       }
       if (mx >= px && mx <= px + pw && my >= py && my <= py + ph)
-        return { zone: z, part: 'move' as const };
+        return { zone: z, part: 'move' };
     }
     return null;
   }, []);
@@ -732,32 +1172,79 @@ export default function DiyPlacementPage() {
     if (pathDrawMode === 'picking-start') {
       pathDrawStart.current = pxToFt(mx, my);
       setPathDrawMode('picking-end');
+      draw();
       return;
     }
     if (pathDrawMode === 'picking-end' && pathDrawStart.current) {
       const endFt = pxToFt(mx, my);
       const seed  = Date.now() % 9999;
+      const id = `path_manual_${Date.now()}`;
       const newPath: PlacedPath = {
-        id:      `path_manual_${Date.now()}`,
-        label:   'Custom walkway',
-        startId: 'manual',
-        endId:   'manual',
-        pts:     buildPath(pathDrawStart.current, endFt, globalPathStyle, seed),
-        style:   globalPathStyle,
-        widthFt: 3,
+        id,
+        label:    `Walkway ${pathsRef.current.length + 1}`,
+        startId:  'manual',
+        endId:    'manual',
+        pts:      buildPath(pathDrawStart.current, endFt, globalPathStyle, seed),
+        style:    globalPathStyle,
+        material: globalPathMaterial,
+        widthFt:  pathWidthForMaterial(globalPathMaterial),
       };
       setPaths(prev => [...prev, newPath]);
+      setSelectedPathId(null);      // collapsed until the user clicks it
       pathDrawStart.current = null;
       setPathDrawMode('idle');
       return;
     }
 
-    const hit = hitTest(mx, my);
+    // Walkway editing: drag a vertex / insert one on the selected path's line.
+    const selPath = pathsRef.current.find(p => p.id === selectedPathIdRef.current);
+    if (selPath) {
+      for (let v = 0; v < selPath.pts.length; v++) {
+        const [vx, vy] = ftToPxRef.current(selPath.pts[v][0], selPath.pts[v][1]);
+        if (Math.hypot(mx - vx, my - vy) <= 9) { pathDragRef.current = { pathId: selPath.id, vertIdx: v }; return; }
+      }
+      for (let e = 0; e < selPath.pts.length - 1; e++) {
+        const a = selPath.pts[e], b = selPath.pts[e + 1];
+        const [ax, ay] = ftToPxRef.current(a[0], a[1]);
+        const [bx, by] = ftToPxRef.current(b[0], b[1]);
+        const c = segClosestPx(mx, my, ax, ay, bx, by);
+        if (c.dist <= 7) {
+          const ptFt = pxToFtRef.current(c.cx, c.cy);
+          pathsRef.current = pathsRef.current.map(p => { if (p.id !== selPath.id) return p; const pts = [...p.pts]; pts.splice(e + 1, 0, ptFt); return { ...p, pts }; });
+          setPaths([...pathsRef.current]);
+          pathDragRef.current = { pathId: selPath.id, vertIdx: e + 1 };
+          draw();
+          return;
+        }
+      }
+    }
+    // Select a walkway by clicking its line.
+    for (let i = pathsRef.current.length - 1; i >= 0; i--) {
+      const p = pathsRef.current[i];
+      let near = false;
+      const w = Math.max(7, p.widthFt * scaleRef.current / 2);
+      for (let e = 0; e < p.pts.length - 1 && !near; e++) {
+        const a = p.pts[e], b = p.pts[e + 1];
+        const [ax, ay] = ftToPxRef.current(a[0], a[1]);
+        const [bx, by] = ftToPxRef.current(b[0], b[1]);
+        if (segClosestPx(mx, my, ax, ay, bx, by).dist <= w) near = true;
+      }
+      if (near) {
+        setSelectedPathId(p.id);
+        selRef.current = null; setSelectedId(null);
+        selBedRef.current = null; setSelectedBedId(null);
+        return;
+      }
+    }
+
+    // Features are only selectable/editable on the features step.
+    const hit = openStepRef.current === 'features' ? hitTest(mx, my) : null;
     if (!hit) {
       const bedHit = hitTestBed(mx, my);
       if (bedHit) {
         selBedRef.current = bedHit.bed.id; setSelectedBedId(bedHit.bed.id);
         selRef.current = null; setSelectedId(null);
+        setSelectedPathId(null);
         bedDragRef.current = {
           kind: bedHit.part, bedId: bedHit.bed.id,
           startMx: mx, startMy: my,
@@ -768,19 +1255,39 @@ export default function DiyPlacementPage() {
       } else {
         selRef.current = null; setSelectedId(null);
         selBedRef.current = null; setSelectedBedId(null);
+        setSelectedPathId(null);
       }
       return;
     }
+    setSelectedPathId(null);
     selRef.current = hit.zone.id;
     setSelectedId(hit.zone.id);
     selBedRef.current = null; setSelectedBedId(null);
+
+    // Click an organic edge → insert a new vertex there and start dragging it.
+    if (hit.part === 'edge' && hit.ptFt && hit.edgeIdx != null) {
+      const zid = hit.zone.id, insertAt = hit.edgeIdx + 1, pt = hit.ptFt;
+      zonesRef.current = zonesRef.current.map(z => {
+        if (z.id !== zid || !z.verts) return z;
+        const verts = [...z.verts]; verts.splice(insertAt, 0, pt); return { ...z, verts };
+      });
+      setPlacedZones([...zonesRef.current]);
+      dragRef.current = { kind: 'vertex', zoneId: zid, vertIdx: insertAt, startMx: mx, startMy: my, origX: 0, origY: 0, origW: 0, origH: 0 };
+      draw();
+      return;
+    }
+    if (hit.part === 'vertex') {
+      dragRef.current = { kind: 'vertex', zoneId: hit.zone.id, vertIdx: hit.vertIdx, startMx: mx, startMy: my, origX: 0, origY: 0, origW: 0, origH: 0 };
+      return;
+    }
     dragRef.current = {
-      kind: hit.part, zoneId: hit.zone.id,
+      kind: hit.part as 'move' | 'resize', zoneId: hit.zone.id,
       startMx: mx, startMy: my,
       origX: hit.zone.xFt, origY: hit.zone.yFt,
       origW: hit.zone.wFt, origH: hit.zone.hFt,
+      origVerts: hit.zone.verts ? hit.zone.verts.map(v => [v[0], v[1]] as [number, number]) : undefined,
     };
-  }, [hitTest, hitTestBed, pathDrawMode, pxToFt, buildPath, globalPathStyle]);
+  }, [hitTest, hitTestBed, pathDrawMode, pxToFt, buildPath, globalPathStyle, globalPathMaterial, draw]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const [mx, my]  = getPos(e);
@@ -789,6 +1296,15 @@ export default function DiyPlacementPage() {
     if (addingBedRef.current?.step === 'draw') {
       if (canvasRef.current) canvasRef.current.style.cursor = 'crosshair';
       bedDrawCursorRef.current = pxToFtRef.current(mx, my);
+      draw();
+      return;
+    }
+
+    // Dragging a walkway vertex.
+    if (pathDragRef.current) {
+      const { pathId, vertIdx } = pathDragRef.current;
+      const ptFt = pxToFtRef.current(mx, my);
+      pathsRef.current = pathsRef.current.map(p => p.id === pathId ? { ...p, pts: p.pts.map((pt, i) => i === vertIdx ? ptFt : pt) } : p);
       draw();
       return;
     }
@@ -802,7 +1318,8 @@ export default function DiyPlacementPage() {
         } else {
           const hit = hitTest(mx, my);
           if (hit) {
-            canvasRef.current.style.cursor = hit.part === 'resize' ? 'se-resize' : 'move';
+            canvasRef.current.style.cursor =
+              hit.part === 'resize' ? 'se-resize' : hit.part === 'vertex' ? 'grab' : hit.part === 'edge' ? 'crosshair' : 'move';
           } else {
             const bedHit = hitTestBed(mx, my);
             canvasRef.current.style.cursor = bedHit
@@ -830,11 +1347,21 @@ export default function DiyPlacementPage() {
       return;
     }
     if (!drag) return;
+    if (drag.kind === 'vertex') {
+      const ptFt = pxToFtRef.current(mx, my);
+      zonesRef.current = zonesRef.current.map(z =>
+        (z.id === drag.zoneId && z.verts) ? { ...z, verts: z.verts.map((v, i) => i === drag.vertIdx ? ptFt : v) } : z);
+      draw();
+      return;
+    }
     const dxFt = (mx - drag.startMx) / scaleRef.current;
     const dyFt = (my - drag.startMy) / scaleRef.current;
     zonesRef.current = zonesRef.current.map(z => {
       if (z.id !== drag.zoneId) return z;
-      if (drag.kind === 'move') return { ...z, xFt: drag.origX + dxFt, yFt: drag.origY + dyFt };
+      if (drag.kind === 'move') {
+        if (drag.origVerts) return { ...z, verts: drag.origVerts.map(v => [v[0] + dxFt, v[1] + dyFt] as [number, number]) };
+        return { ...z, xFt: drag.origX + dxFt, yFt: drag.origY + dyFt };
+      }
       return { ...z, wFt: Math.max(3, drag.origW + dxFt), hFt: Math.max(3, drag.origH + dyFt) };
     });
     draw();
@@ -842,6 +1369,11 @@ export default function DiyPlacementPage() {
 
   const handleMouseUp = useCallback(() => {
     if (addingBedRef.current?.step === 'draw') return; // finalised via onDoubleClick
+    if (pathDragRef.current) {
+      setPaths([...pathsRef.current]);
+      pathDragRef.current = null;
+      return;
+    }
     if (bedDragRef.current) {
       setPlacedBeds([...bedsRef.current]);
       bedDragRef.current = null;
@@ -917,6 +1449,74 @@ export default function DiyPlacementPage() {
     draw();
   }, [draw]);
 
+  // Place a feature via the list "+" button (alternative to dragging) — drops it near
+  // the centre of the yard, staggered so repeated placements stay visible.
+  const placeFeature = useCallback((item: ToolbarItem) => {
+    if (!cs) return;
+    const offset = zonesRef.current.filter(z => z.key === item.key).length * 6;
+    const x0 = cs.widthFt / 2 - item.defaultW / 2 + offset;
+    const y0 = cs.heightFt / 2 - item.defaultH / 2 + offset;
+    const id = `z_${Date.now()}`;
+    const newZone: PlacedZone = {
+      id, key: item.key, label: item.label,
+      color: item.color, shape: item.shape,
+      xFt: x0, yFt: y0, wFt: item.defaultW, hFt: item.defaultH,
+    };
+    const updated = [...zonesRef.current, newZone];
+    zonesRef.current = updated;
+    selRef.current   = newZone.id;
+    setPlacedZones(updated);
+    setSelectedId(newZone.id);
+    setActiveToolKey(item.key);
+    setSkippedKeys(prev => { if (!prev.has(item.key)) return prev; const n = new Set(prev); n.delete(item.key); return n; });
+    selBedRef.current = null; setSelectedBedId(null);
+    draw();
+  }, [cs, draw]);
+
+  // Remove a single placed instance (the "✕" on a placed feature row).
+  const removeInstance = useCallback((zoneId: string) => {
+    const updated = zonesRef.current.filter(z => z.id !== zoneId);
+    zonesRef.current = updated;
+    setPlacedZones(updated);
+    if (selRef.current === zoneId) { selRef.current = null; setSelectedId(null); }
+    draw();
+  }, [draw]);
+
+  // Update a placed feature (shape / material) from the sidebar editor under its row.
+  const updateZone = useCallback((zoneId: string, patch: Partial<PlacedZone>) => {
+    const updated = zonesRef.current.map(z => z.id === zoneId ? { ...z, ...patch } : z);
+    zonesRef.current = updated;
+    setPlacedZones(updated);
+  }, []);
+
+  // Update a placed bed (type / material / variant) from the sidebar editor under its row.
+  const updateBed = useCallback((bedId: string, patch: Partial<PlacedBed>) => {
+    const updated = bedsRef.current.map(b => b.id === bedId ? { ...b, ...patch } : b);
+    bedsRef.current = updated;
+    setPlacedBeds(updated);
+  }, []);
+
+  // Approximate footprint of a placed feature, in sq ft.
+  const zoneAreaFt = useCallback((z: PlacedZone): number => {
+    if (z.verts && z.verts.length >= 3) {
+      let a = 0;
+      for (let i = 0; i < z.verts.length; i++) { const j = (i + 1) % z.verts.length; a += z.verts[i][0] * z.verts[j][1] - z.verts[j][0] * z.verts[i][1]; }
+      return Math.abs(a / 2);
+    }
+    if (z.shape === 'circle') return (Math.PI / 4) * z.wFt * z.hFt;
+    return z.wFt * z.hFt;
+  }, []);
+
+  // Skip a feature the user doesn't want (the "✕" on an unplaced feature row) — marks it
+  // decided so the step can auto-advance. Toggles back off.
+  const toggleSkip = useCallback((key: string) => {
+    setSkippedKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
   // ── Bed polygon drawing ──────────────────────────────────────────────────────
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (addingBedRef.current?.step !== 'draw') return;
@@ -936,11 +1536,12 @@ export default function DiyPlacementPage() {
     const verts = bedDrawVertsRef.current;
     if (verts.length < 3) return; // not enough points yet
 
-    const { type = 'planted', material = 'mulch' } = addingBedRef.current!;
+    const { type = 'planted', material = 'mulch', variant } = addingBedRef.current!;
+    const bedNum = bedsRef.current.filter(b => b.material !== 'lawn').length + 1;
     const newBed: PlacedBed = {
       id:    `bed_${Date.now()}`,
-      label: type === 'planted' ? 'Planted bed' : 'Unplanted area',
-      type, material, shape: 'poly',
+      label: material === 'lawn' ? 'Lawn area' : `Bed ${bedNum}`,
+      type, material, variant, shape: 'poly',
       xFt: 0, yFt: 0, wFt: 0, hFt: 0,
       verts: [...verts],
     };
@@ -955,16 +1556,19 @@ export default function DiyPlacementPage() {
     setAddingBed(null);
   }, [draw]);
 
+  // Keep the satellite locked to the canvas view, applied imperatively (the GoogleMap
+  // zoom/center props aren't reliably re-applied after mount). This keeps the imagery,
+  // existing features, and the canvas (where clipping happens) in one coordinate space.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map && boundary.length >= 3) { map.setCenter(mapView.center); map.setZoom(mapView.zoom); }
+  }, [mapView, boundary.length]);
+
+  // Wheel over the canvas must NOT zoom the map (that would desync it from the canvas).
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      const map  = mapRef.current;
-      if (!map) return;
-      const zoom = map.getZoom() ?? 20;
-      map.setZoom(e.deltaY < 0 ? zoom + 1 : zoom - 1);
-    };
+    const onWheel = (e: WheelEvent) => { e.preventDefault(); };
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
   }, []);
@@ -973,14 +1577,22 @@ export default function DiyPlacementPage() {
   const [openStep,  setOpenStep]  = useState<StepId | null>('features');
   const [doneSteps, setDoneSteps] = useState<Set<StepId>>(new Set());
 
+  // Changing steps (incl. clicking Done) deactivates everything, so no leftover
+  // shape/size toolbar or handles linger on a later step.
+  const openStepRef = useRef<StepId | null>('features');
+  useEffect(() => {
+    openStepRef.current = openStep;
+    selRef.current = null;    setSelectedId(null);
+    selBedRef.current = null; setSelectedBedId(null);
+    setSelectedPathId(null);
+  }, [openStep]);
+
   // Visible steps
   const visibleSteps = useMemo<StepId[]>(() => [
     'features',
     'walkways',
     'materials',
-    ...(lawnAmount !== 'none' ? ['lawn' as StepId] : []),
-    'review',
-  ], [lawnAmount]);
+  ], []);
 
   const getNextStep = useCallback((from: StepId): StepId | null => {
     const idx = visibleSteps.indexOf(from);
@@ -994,31 +1606,102 @@ export default function DiyPlacementPage() {
 
   const isDoneStep = (id: StepId) => doneSteps.has(id);
 
-  // ── Stats
-  const boundaryAreaFt = useMemo(() => {
-    if (!cs || boundary.length < 3) return 0;
-    const pts = boundary.map(v => cs.toXY(v[0], v[1]));
-    let area = 0;
-    for (let i = 0; i < pts.length; i++) {
-      const j = (i + 1) % pts.length;
-      area += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
-    }
-    return Math.round(Math.abs(area / 2));
-  }, [cs, boundary]);
 
-  const zoneAreaFt = Math.round(placedZones.reduce((s, z) => s + z.wFt * z.hFt, 0));
-  const lawnAreaFt = Math.max(0, boundaryAreaFt - zoneAreaFt);
-  const lawnPct    = boundaryAreaFt > 0 ? Math.round(lawnAreaFt / boundaryAreaFt * 100) : 0;
+  // ── Stats
+  // Lawn coverage = the lawn zones the user placed (not residual space).
+  const lawnAreaFt = useMemo(() => {
+    if (!cs) return 0;
+    const lawns = placedZones.filter(z => z.key === 'lawn' && z.wFt > 0 && z.hFt > 0);
+    if (!lawns.length) return 0;
+    // Same obstacles the renderer clips the lawn against, so the area matches what's drawn.
+    const obstacles: turf.Feature<turf.Polygon | turf.MultiPolygon>[] = [];
+    for (const z of placedZones) if (z.key !== 'lawn' && (z.verts || (z.wFt > 0 && z.hFt > 0))) { try { obstacles.push(turf.polygon([shapeRingFt(z.shape, z.xFt, z.yFt, z.wFt, z.hFt, z.id, z.verts)])); } catch { /* skip */ } }
+    for (const b of placedBeds) { try { obstacles.push(turf.polygon([shapeRingFt(b.shape, b.xFt, b.yFt, b.wFt, b.hFt, b.id, b.verts)])); } catch { /* skip */ } }
+    for (const p of paths) { const pp = pathPolyFt(p.pts, p.widthFt); if (pp) obstacles.push(pp); }
+    for (const v of obstacleFt) { const r = closeRingPts(v); if (r) { try { obstacles.push(turf.polygon([r])); } catch { /* skip */ } } }
+    let bdy: turf.Feature<turf.Polygon | turf.MultiPolygon> | null = null;
+    const bc = closeRingPts(boundaryFt); if (bc) { try { bdy = turf.polygon([bc]); } catch { bdy = null; } }
+    let total = 0;
+    for (const z of lawns) {
+      let geom: turf.Feature<turf.Polygon | turf.MultiPolygon> | null = turf.polygon([shapeRingFt(z.shape, z.xFt, z.yFt, z.wFt, z.hFt, z.id, z.verts)]);
+      if (bdy) { try { geom = turf.intersect(geom, bdy) as typeof geom; } catch { /* keep */ } }
+      for (const ob of obstacles) { if (!geom) break; try { geom = turf.difference(geom, ob) as typeof geom; } catch { /* keep */ } }
+      if (geom) total += featureAreaFt(geom);
+    }
+    return Math.round(total);
+  }, [placedZones, placedBeds, paths, obstacleFt, boundaryFt, cs]);
+  const lawnPct    = boundaryAreaFt > 0 ? Math.min(100, Math.round(lawnAreaFt / boundaryAreaFt * 100)) : 0;
+
+  // The open ground covered by the primary material: boundary minus every feature, bed,
+  // walkway and existing structure — clipped (not summed) so overlaps don't double-count.
+  const primaryGroundAreaFt = useMemo(() => {
+    if (!cs || boundaryFt.length < 3) return 0;
+    const bc = closeRingPts(boundaryFt);
+    if (!bc) return 0;
+    let geom: turf.Feature<turf.Polygon | turf.MultiPolygon> | null = null;
+    try { geom = turf.polygon([bc]); } catch { return 0; }
+    const cut = (poly: turf.Feature<turf.Polygon | turf.MultiPolygon> | null) => { if (geom && poly) { try { geom = turf.difference(geom, poly) as typeof geom; } catch { /* keep */ } } };
+    for (const v of obstacleFt) { const r = closeRingPts(v); if (r) { try { cut(turf.polygon([r])); } catch { /* skip */ } } }
+    for (const z of placedZones) if (z.verts || (z.wFt > 0 && z.hFt > 0)) { try { cut(turf.polygon([shapeRingFt(z.shape, z.xFt, z.yFt, z.wFt, z.hFt, z.id, z.verts)])); } catch { /* skip */ } }
+    for (const b of placedBeds) { try { cut(turf.polygon([shapeRingFt(b.shape, b.xFt, b.yFt, b.wFt, b.hFt, b.id, b.verts)])); } catch { /* skip */ } }
+    for (const p of paths) { const pp = pathPolyFt(p.pts, p.widthFt); if (pp) cut(pp); }
+    return geom ? Math.round(featureAreaFt(geom)) : 0;
+  }, [placedZones, placedBeds, paths, obstacleFt, boundaryFt, cs]);
+
+  // Every selected feature must be placed or skipped before leaving the features step.
+  const allFeaturesDecided = featItems.length > 0 && featItems.every(item => placedZones.some(z => z.key === item.key) || skippedKeys.has(item.key));
+
+  // Tight-gap warnings: two features less than ~2 ft apart but not touching — too small
+  // to plant, yet not flush. The user should either close the gap or open it up.
+  const GAP_MIN_FT = 2;
+  const gapWarnings = useMemo(() => {
+    type GapItem = { label: string; ring: Ring; bbox: [number, number, number, number] };
+    const mk = (label: string, ring: Ring): GapItem => ({ label, ring, bbox: ringBbox(ring) });
+
+    // The placed features we warn about being too tight.
+    const zones: GapItem[] = placedZones
+      .filter(z => z.verts || (z.wFt > 0 && z.hFt > 0))
+      .map(z => mk(z.label, shapeRingFt(z.shape, z.xFt, z.yFt, z.wFt, z.hFt, z.id, z.verts)));
+
+    // Everything a feature could sit too close to: walkways + non-tree existing features.
+    const others: GapItem[] = [];
+    for (const p of paths) { const poly = pathPolyFt(p.pts, p.widthFt); if (poly) for (const r of featureRings(poly)) others.push(mk('Walkway', r)); }
+    if (cs) for (const f of existing) {
+      if (!f.keep || f.type === 'tree' || f.vertices.length < 3) continue;
+      const cr = closeRingPts(f.vertices.map(v => cs.toXY(v[0], v[1])));
+      if (cr) others.push(mk(f.type === 'house' ? 'House' : 'Existing feature', cr));
+    }
+
+    const out: { a: string; b: string; gap: number }[] = [];
+    const check = (A: GapItem, B: GapItem) => {
+      if (bboxGapFt(A.bbox, B.bbox) >= GAP_MIN_FT) return;
+      if (ringsOverlap(A.ring, B.ring)) return; // overlapping → clipped flush, no gap
+      const gap = ringsMinDist(A.ring, B.ring);
+      if (gap > 0.15 && gap < GAP_MIN_FT) out.push({ a: A.label, b: B.label, gap });
+    };
+    for (let i = 0; i < zones.length; i++) for (let j = i + 1; j < zones.length; j++) check(zones[i], zones[j]);
+    for (const z of zones) for (const o of others) check(z, o);
+    return out;
+  }, [placedZones, paths, existing, cs]);
 
   const waterHint = lawnAmount === 'none'
     ? "Since you're not planning much lawn, position this as a focal point — something you walk toward or see from the house."
     : lawnAmount === 'lot'
     ? 'A focal point at the far end works especially well with more lawn — gives the open space a visual anchor.'
-    : "Place where it'll be visible from your main seating area — either as a backdrop behind it, or at the far end as a focal point.";
+    : "Place it where you'll see it most — near the house, along a path, or as a focal point at the far end you can enjoy from inside.";
 
   // Selection panel
   const selectedZone = placedZones.find(z => z.id === selectedId) ?? null;
-  const areaSqFt     = selectedZone ? Math.round(selectedZone.wFt * selectedZone.hFt) : 0;
+
+  // Active feature (defaults to the first in the list) and its placement hint for the map banner.
+  const activeKey  = activeToolKey ?? featItems[0]?.key ?? null;
+  const activeHint = activeKey ? (activeKey === 'water' ? waterHint : (FEAT_HINTS[activeKey] ?? '')) : '';
+
+  // Instruction shown at the top of the map (active feature hint on the features step) —
+  // only once at least one feature has actually been placed.
+  const topBanner =
+    openStep === 'features' ? (placedZones.length > 0 ? activeHint : '')
+    : '';
 
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
@@ -1034,7 +1717,7 @@ export default function DiyPlacementPage() {
       </div>
 
       <div className="flex-shrink-0" style={{ paddingLeft: '8rem', marginTop: '2rem', marginBottom: '3.5rem' }}>
-        <h1 style={{ fontFamily: IS, fontSize: '4rem', color: '#2A2A26', lineHeight: 1.05, margin: 0, fontWeight: 400 }}>Design your yard.</h1>
+        <h1 style={{ fontFamily: IS, fontSize: '4rem', color: '#2A2A26', lineHeight: 1.05, margin: 0, fontWeight: 400 }}>Build your layout</h1>
       </div>
 
       <div className="flex flex-1 overflow-hidden pr-32 gap-5 items-start" style={{ paddingBottom: '1.25rem', paddingLeft: '8rem' }}>
@@ -1043,14 +1726,6 @@ export default function DiyPlacementPage() {
         <div className="flex flex-col flex-shrink-0" style={{ width: '33%', height: '81%', background: '#EFE9DA', overflow: 'hidden', borderRadius: '1rem', boxShadow: '0 12px 48px rgba(0,0,0,0.12)' }}>
 
           <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-
-            {/* Toolbar title */}
-            <div style={{ padding: '1.25rem 1.25rem 0' }}>
-              <h2 style={{ fontFamily: IS, fontSize: '1.5rem', color: '#2A2A26', lineHeight: 1.1, margin: 0, fontWeight: 400 }}>Place your features</h2>
-              <p style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', marginTop: '0.35rem' }}>
-                Drag each feature onto the map, then fine-tune its size and spot.
-              </p>
-            </div>
 
             {/* Accordion */}
             <div style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
@@ -1070,8 +1745,7 @@ export default function DiyPlacementPage() {
                     const total = zones + conns;
                     return total > 0 ? `— ${total} placed` : null;
                   }
-                  if (stepId === 'materials') return `— ${defaultMaterial}${placedBeds.length > 0 ? `, ${placedBeds.length} bed${placedBeds.length !== 1 ? 's' : ''}` : ''}`;
-                  if (stepId === 'lawn') return boundaryAreaFt > 0 ? `— ${lawnPct}%` : null;
+                  if (stepId === 'materials') { const parts = [defaultMaterial, placedBeds.length > 0 ? `${placedBeds.length} bed${placedBeds.length !== 1 ? 's' : ''}` : null].filter(Boolean); return parts.length ? `— ${parts.join(', ')}` : null; }
                   return null;
                 })();
 
@@ -1110,41 +1784,166 @@ export default function DiyPlacementPage() {
                             No features selected in preferences.
                           </p>
                         ) : (
-                          <div className="flex flex-col gap-2 pt-3">
-                            {featItems.map(item => {
-                              const placed = placedZones.filter(z => z.key === item.key).length;
-                              const hint   = item.key === 'water' ? waterHint : (FEAT_HINTS[item.key] ?? '');
-                              return (
-                                <div key={item.key} draggable onDragStart={handleToolDragStart(item)}
-                                  className="flex items-start gap-3 rounded-2xl p-3 hover:opacity-90 transition-all"
-                                  style={{ background: 'white', cursor: 'grab', userSelect: 'none', border: placed > 0 ? `1.5px solid ${item.color}55` : '1.5px solid transparent' }}>
-                                  <div style={{
-                                    width: 28, height: 28, flexShrink: 0, marginTop: 2,
-                                    borderRadius: item.shape === 'circle' ? '50%' : 6,
-                                    background: item.color,
-                                  }} />
-                                  <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' }}>
-                                      <span style={{ fontFamily: IT, fontSize: '0.85rem', color: '#2A2A26', fontWeight: 600 }}>{item.label}</span>
-                                      {placed > 0 && (
-                                        <span style={{ fontFamily: IT, fontSize: '0.65rem', color: '#2F6B4F', fontWeight: 700 }}>
-                                          ✓{placed > 1 ? ` ×${placed}` : ''}
-                                        </span>
-                                      )}
+                          // Clicking anywhere in this step that isn't a feature row collapses the active feature.
+                          <div className="flex flex-col gap-2 pt-3" onClick={() => { selRef.current = null; setSelectedId(null); }}>
+                            {gapWarnings.length > 0 && (
+                              <div style={{ borderRadius: 12, padding: '0.7rem 0.85rem', background: '#FEF3C7', border: '1px solid #F59E0B' }}>
+                                <p style={{ fontFamily: IT, fontSize: '0.76rem', color: '#92400E', margin: '0 0 0.35rem', fontWeight: 600 }}>
+                                  Tight gap{gapWarnings.length > 1 ? 's' : ''} under {GAP_MIN_FT} ft
+                                </p>
+                                <p style={{ fontFamily: IT, fontSize: '0.73rem', color: '#92400E', margin: '0 0 0.45rem', lineHeight: 1.5 }}>
+                                  Too small to plant — either move these together so they touch, or leave at least {GAP_MIN_FT} ft between them.
+                                </p>
+                                <div className="flex flex-col gap-0.5">
+                                  {gapWarnings.slice(0, 4).map((w, i) => (
+                                    <span key={i} style={{ fontFamily: IT, fontSize: '0.72rem', color: '#92400E' }}>• {w.a} ↔ {w.b} ({w.gap.toFixed(1)} ft)</span>
+                                  ))}
+                                  {gapWarnings.length > 4 && (
+                                    <span style={{ fontFamily: IT, fontSize: '0.72rem', color: '#92400E', opacity: 0.8 }}>+{gapWarnings.length - 4} more</span>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                            {featItems.flatMap(item => {
+                              const instances = placedZones.filter(z => z.key === item.key);
+                              if (skippedKeys.has(item.key)) return [];   // skipped → shown in Deleted features below
+                              // One row per placed instance (numbered), or a single unplaced row.
+                              const rows: { zone: PlacedZone | null; label: string }[] =
+                                instances.length > 0
+                                  ? instances.map((zone, i) => ({ zone, label: i === 0 ? item.label : `${item.label} ${i + 1}` }))
+                                  : [{ zone: null, label: item.label }];
+                              return rows.map(row => {
+                                const isActive = row.zone ? selectedId === row.zone.id : activeKey === item.key;
+                                const labelStyle: React.CSSProperties = { fontFamily: IT, fontSize: '0.62rem', color: '#9A9A92', letterSpacing: '0.09em', textTransform: 'uppercase', fontWeight: 700 };
+                                return (
+                                  <div key={row.zone ? row.zone.id : item.key} className="flex flex-col gap-2" onClick={e => e.stopPropagation()}>
+                                    <div draggable
+                                      onDragStart={e => { setActiveToolKey(item.key); handleToolDragStart(item)(e); }}
+                                      onClick={() => { setActiveToolKey(item.key); if (row.zone) { const on = selectedId === row.zone.id; selRef.current = on ? null : row.zone.id; setSelectedId(on ? null : row.zone.id); selBedRef.current = null; setSelectedBedId(null); } }}
+                                      className="flex items-center gap-3 rounded-2xl p-3 transition-all"
+                                      style={{ background: 'white', cursor: 'grab', userSelect: 'none',
+                                        outline: isActive ? `2px solid ${item.color}` : '1.5px solid transparent',
+                                        boxShadow: isActive ? `0 0 0 3px ${item.color}26` : 'none' }}>
+                                      <div style={{
+                                        width: 28, height: 28, flexShrink: 0,
+                                        borderRadius: item.shape === 'circle' ? '50%' : 6,
+                                        background: item.color,
+                                      }} />
+                                      <div style={{ flex: 1, minWidth: 0 }}>
+                                        <span style={{ fontFamily: IT, fontSize: '0.88rem', color: '#2A2A26', fontWeight: 600 }}>{row.label}</span>
+                                      </div>
+                                      <div className="flex gap-1.5" onClick={e => e.stopPropagation()}>
+                                        <button onClick={() => placeFeature(item)} title="Add new"
+                                          className="flex items-center justify-center rounded-xl hover:opacity-80 transition-all"
+                                          style={{ width: 40, height: 40, cursor: 'pointer', fontSize: '1.25rem', fontWeight: 700, lineHeight: 1,
+                                            background: 'rgba(42,42,38,0.06)', border: '1.5px solid rgba(42,42,38,0.12)', color: '#2F6B4F' }}>
+                                          +
+                                        </button>
+                                        <button onClick={() => { if (row.zone) removeInstance(row.zone.id); else toggleSkip(item.key); }}
+                                          title="Delete"
+                                          className="flex items-center justify-center rounded-xl hover:opacity-80 transition-all"
+                                          style={{ width: 40, height: 40, fontSize: '0.9rem', cursor: 'pointer',
+                                            background: 'rgba(42,42,38,0.06)', border: '1.5px solid rgba(42,42,38,0.12)', color: '#9A9A92' }}>
+                                          ✕
+                                        </button>
+                                      </div>
                                     </div>
-                                    {hint && (
-                                      <span style={{ fontFamily: IT, fontSize: '0.73rem', color: '#9A9A92', lineHeight: 1.5 }}>{hint}</span>
-                                    )}
+
+                                    {/* Active feature editor — shape, material & size, mirroring the walkway flow */}
+                                    {row.zone && isActive && (() => {
+                                      const z = row.zone;
+                                      return (
+                                        <div className="flex flex-col gap-2.5 px-1 pb-1">
+                                          <div className="flex flex-col gap-1.5">
+                                            <span style={labelStyle}>Shape</span>
+                                            <div className="flex gap-1.5">
+                                              {([{ k: 'rect' as ZoneShape, r: 6 as number | string }, { k: 'circle' as ZoneShape, r: '50%' }, { k: 'organic' as ZoneShape, r: '62% 38% 55% 45% / 55% 48% 52% 45%' }]).map(s => {
+                                                const on = z.shape === s.k;
+                                                return (
+                                                  <button key={s.k} onClick={() => updateZone(z.id, { shape: s.k, verts: undefined })}
+                                                    className="flex-1 flex items-center justify-center rounded-xl py-2.5 hover:opacity-80 transition-all"
+                                                    style={{ cursor: 'pointer', border: on ? `2px solid ${item.color}` : '1.5px solid rgba(42,42,38,0.12)', background: on ? item.color + '12' : 'white' }}>
+                                                    <div style={{ width: 22, height: s.k === 'rect' ? 16 : 22, borderRadius: s.r, background: item.color }} />
+                                                  </button>
+                                                );
+                                              })}
+                                            </div>
+                                          </div>
+                                          {MATERIAL_FEATURES.has(item.key) && (
+                                            <div className="flex flex-col gap-1.5">
+                                              <span style={labelStyle}>Material</span>
+                                              <div className="flex flex-wrap gap-1.5">
+                                                {FEATURE_MATERIALS.map(m => {
+                                                  const on = z.material === m.id;
+                                                  return (
+                                                    <button key={m.id} onClick={() => updateZone(z.id, { material: on ? undefined : m.id })}
+                                                      className="flex items-center gap-1 rounded-full px-2.5 py-1 transition-all hover:opacity-80"
+                                                      style={{ fontFamily: IT, fontSize: '0.72rem', fontWeight: 500, cursor: 'pointer',
+                                                        background: on ? '#2A2A26' : 'rgba(42,42,38,0.06)', color: on ? '#efe9db' : '#2A2A26', border: on ? 'none' : '1.5px solid rgba(42,42,38,0.12)' }}>
+                                                      <div style={{ width: 10, height: 10, borderRadius: 2, background: m.color, flexShrink: 0, boxShadow: on ? '0 0 0 1.5px rgba(255,255,255,0.5)' : 'none' }} />
+                                                      {m.label}<span style={{ fontSize: '0.66rem', opacity: 0.6, marginLeft: 3 }}>{m.price}</span>
+                                                    </button>
+                                                  );
+                                                })}
+                                              </div>
+                                            </div>
+                                          )}
+                                          <div className="flex items-center justify-between">
+                                            <span style={labelStyle}>Size</span>
+                                            <span style={{ fontFamily: IT, fontSize: '0.8rem', color: '#2A2A26', fontWeight: 600 }}>
+                                              {Math.round(z.wFt)} × {Math.round(z.hFt)} ft · {Math.round(zoneAreaFt(z)).toLocaleString()} sq ft
+                                            </span>
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
                                   </div>
-                                  <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#C8C8C0', flexShrink: 0, paddingTop: 4 }}>⠿</span>
+                                );
+                              });
+                            })}
+                            {(() => {
+                              const deleted = featItems.filter(it => skippedKeys.has(it.key));
+                              if (deleted.length === 0) return null;
+                              return (
+                                <div className="flex flex-col gap-1.5 pt-1">
+                                  <button onClick={() => setShowDeleted(s => !s)}
+                                    style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0', fontFamily: IT, fontSize: '0.75rem', color: '#9A9A92', fontWeight: 500 }}>
+                                    <span>{showDeleted ? '▾' : '▸'}</span>
+                                    Deleted features ({deleted.length})
+                                  </button>
+                                  {showDeleted && deleted.map(item => (
+                                    <div key={item.key} className="flex items-center gap-3 rounded-xl px-3 py-2" style={{ background: 'rgba(42,42,38,0.04)' }}>
+                                      <div style={{ width: 18, height: 18, borderRadius: item.shape === 'circle' ? '50%' : 4, flexShrink: 0, opacity: 0.5, background: item.color }} />
+                                      <span style={{ flex: 1, minWidth: 0, fontFamily: IT, fontSize: '0.8rem', color: '#9A9A92', textDecoration: 'line-through', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.label}</span>
+                                      <button onClick={() => toggleSkip(item.key)}
+                                        style={{ flexShrink: 0, background: 'none', border: '1.5px solid rgba(42,42,38,0.2)', borderRadius: 100, padding: '3px 10px', cursor: 'pointer', fontFamily: IT, fontSize: '0.72rem', fontWeight: 500, color: '#2A2A26' }}>
+                                        Restore
+                                      </button>
+                                    </div>
+                                  ))}
                                 </div>
                               );
-                            })}
-                            <button onClick={() => advanceToNext('features')}
-                              className="mt-1 rounded-full py-2.5 hover:opacity-90 transition-all"
-                              style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-                              Continue →
-                            </button>
+                            })()}
+                            <div className="flex items-center justify-between mt-1">
+                              <button onClick={() => {
+                                  zonesRef.current = [];
+                                  setPlacedZones([]);
+                                  setSkippedKeys(new Set());
+                                  selRef.current = null; setSelectedId(null);
+                                  setActiveToolKey(null);
+                                  draw();
+                                }}
+                                style={{ fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, color: '#9A9A92', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                                Reset
+                              </button>
+                              <button onClick={() => advanceToNext('features')} disabled={!allFeaturesDecided}
+                                title={allFeaturesDecided ? '' : 'Place or skip each feature first'}
+                                className="rounded-full px-5 py-1.5 transition-all"
+                                style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, border: 'none',
+                                  cursor: allFeaturesDecided ? 'pointer' : 'default', opacity: allFeaturesDecided ? 1 : 0.4 }}>
+                                Done →
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1154,228 +1953,130 @@ export default function DiyPlacementPage() {
                     {stepId === 'walkways' && isOpen && (() => {
                       return (
                         <div className="px-5 pb-4" style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
-                          <div className="flex flex-col gap-3 pt-3">
+                          {/* Clicking anywhere in this step that isn't a walkway row deselects the active walkway. */}
+                          <div className="flex flex-col gap-3 pt-3" onClick={() => setSelectedPathId(null)}>
 
-                            {/* Style toggle */}
-                            <div>
-                              <span style={{ fontFamily: IT, fontSize: '0.68rem', fontWeight: 700, color: '#6A6A60', letterSpacing: '0.07em', textTransform: 'uppercase', display: 'block', marginBottom: '0.4rem' }}>
-                                Walkway style
-                              </span>
-                              <div className="flex gap-2">
-                                {(['straight', 'winding'] as const).map(s => (
-                                  <button key={s}
-                                    onClick={() => {
-                                      setGlobalPathStyle(s);
-                                      const zones = zonesRef.current;
-                                      const csNow = csRef.current;
-                                      const dp    = doorPointRef.current;
-                                      const bft   = boundaryFtRef.current;
-                                      const getNodePt = (id: string): [number, number] | null => {
-                                        if (id === 'door') return (dp && csNow) ? csNow.toXY(dp[0], dp[1]) : null;
-                                        if (id === 'manual') return null;
-                                        const z = zones.find(z => z.id === id);
-                                        return z ? [z.xFt + z.wFt / 2, z.yFt + z.hFt / 2] : null;
-                                      };
-                                      setPaths(prev => prev.map(p => {
-                                        const startPt = getNodePt(p.startId), endPt = getNodePt(p.endId);
-                                        if (!startPt || !endPt) return { ...p, style: s };
-                                        const seed = p.id.split('').reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0, 0x811c9dc5);
-                                        return { ...p, style: s, pts: truncateAtObstacles(clipPathToBoundary(generatePathPts(startPt, endPt, s, seed), bft), obstacleFtRef.current) };
-                                      }));
-                                    }}
-                                    className="flex-1 rounded-xl py-2 transition-all hover:opacity-80"
-                                    style={{
-                                      fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer',
-                                      background: globalPathStyle === s ? '#2A2A26' : 'rgba(42,42,38,0.06)',
-                                      color:      globalPathStyle === s ? '#efe9db' : '#2A2A26',
-                                      border:     globalPathStyle === s ? 'none'    : '1.5px solid rgba(42,42,38,0.12)',
-                                    }}>
-                                    {s.charAt(0).toUpperCase() + s.slice(1)}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-
-                            {/* Connect features */}
-                            {(() => {
-                              const connectNodes = [
-                                ...(doorPoint && cs ? [{ id: 'door', label: 'Main door', color: '#F5C518', pt: cs.toXY(doorPoint[0], doorPoint[1]) as [number, number] }] : []),
-                                ...placedZones.map(z => ({ id: z.id, label: z.label, color: z.color, pt: [z.xFt + z.wFt / 2, z.yFt + z.hFt / 2] as [number, number] })),
-                              ];
-                              if (connectNodes.length < 2) return null;
-
-                              const handleNodeClick = (node: { id: string; label: string; pt: [number, number] }) => {
-                                if (!pathConnectStart) {
-                                  setPathConnectStart(node);
-                                  return;
-                                }
-                                if (pathConnectStart.id === node.id) {
-                                  setPathConnectStart(null);
-                                  return;
-                                }
-                                const seed = [...pathConnectStart.id, ...node.id].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0, 0x811c9dc5);
-                                const newPath: PlacedPath = {
-                                  id:      `path_${pathConnectStart.id}_${node.id}`,
-                                  label:   `${pathConnectStart.label} → ${node.label}`,
-                                  startId: pathConnectStart.id,
-                                  endId:   node.id,
-                                  pts:     buildPath(pathConnectStart.pt, node.pt, globalPathStyle, seed),
-                                  style:   globalPathStyle,
-                                  widthFt: 3,
-                                };
-                                setPaths(prev => [...prev.filter(p => p.id !== newPath.id), newPath]);
-                                setPathConnectStart(null);
-                              };
-
-                              return (
-                                <div>
-                                  <span style={{ fontFamily: IT, fontSize: '0.68rem', fontWeight: 700, color: '#6A6A60', letterSpacing: '0.07em', textTransform: 'uppercase', display: 'block', marginBottom: '0.5rem' }}>
-                                    {pathConnectStart ? `Connect from ${pathConnectStart.label} to…` : "Are there any features you’d like to connect?"}
-                                  </span>
-                                  <div className="flex flex-wrap gap-1.5">
-                                    {connectNodes.map(node => {
-                                      const isStart = pathConnectStart?.id === node.id;
-                                      return (
-                                        <button key={node.id} onClick={() => handleNodeClick(node)}
-                                          className="flex items-center gap-1.5 rounded-full transition-all hover:opacity-80"
-                                          style={{
-                                            padding: '5px 10px',
-                                            background: isStart ? '#2A2A26' : 'rgba(42,42,38,0.06)',
-                                            border: isStart ? 'none' : '1.5px solid rgba(42,42,38,0.12)',
-                                            cursor: 'pointer',
-                                          }}>
-                                          <div style={{ width: 8, height: 8, borderRadius: '50%', background: isStart ? 'white' : node.color, flexShrink: 0 }} />
-                                          <span style={{ fontFamily: IT, fontSize: '0.76rem', fontWeight: 500, color: isStart ? '#efe9db' : '#2A2A26' }}>
-                                            {node.label}
-                                          </span>
-                                        </button>
-                                      );
-                                    })}
-                                  </div>
-                                  {pathConnectStart && (
-                                    <button onClick={() => setPathConnectStart(null)}
-                                      style={{ fontFamily: IT, fontSize: '0.7rem', color: '#B0B0A6', background: 'none', border: 'none', cursor: 'pointer', padding: '0.35rem 0 0', display: 'block' }}>
-                                      Cancel
-                                    </button>
-                                  )}
-                                </div>
-                              );
-                            })()}
-
-                            {/* Draw custom */}
+                            {/* Add a walkway → pick a style → click two points on the map */}
                             {pathDrawMode === 'idle' ? (
-                              <button onClick={() => setPathDrawMode('picking-start')}
-                                className="rounded-xl py-2 hover:opacity-80 transition-all"
-                                style={{ background: 'rgba(42,42,38,0.06)', border: '1.5px solid rgba(42,42,38,0.12)', fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26', cursor: 'pointer' }}>
-                                + Draw custom walkway
+                              <button onClick={() => setPathDrawMode('choosing-style')}
+                                className="flex items-center justify-between gap-2 rounded-xl px-3 py-2.5 hover:opacity-80 transition-all"
+                                style={{ width: '100%', background: 'rgba(42,42,38,0.04)', border: '1.5px dashed rgba(42,42,38,0.18)', cursor: 'pointer' }}>
+                                <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500 }}>Add a walkway</span>
+                                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 22, height: 22, borderRadius: '50%', background: '#2A2A26', color: '#efe9db', fontSize: '1rem', lineHeight: 1, flexShrink: 0 }}>+</span>
                               </button>
                             ) : (
-                              <div className="flex items-center justify-between rounded-xl px-3 py-2" style={{ background: 'rgba(196,173,140,0.18)', border: '1.5px solid rgba(196,173,140,0.5)' }}>
-                                <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26' }}>
-                                  {pathDrawMode === 'picking-start' ? 'Click the map — start point' : 'Click again — end point'}
-                                </span>
-                                <button onClick={() => { setPathDrawMode('idle'); pathDrawStart.current = null; }}
-                                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0 }}>✕</button>
+                              <div className="flex flex-col gap-2 rounded-xl px-3 py-3" style={{ background: 'rgba(196,173,140,0.18)', border: '1.5px solid rgba(196,173,140,0.5)' }}>
+                                <div className="flex items-start justify-between gap-2">
+                                  {pathDrawMode === 'picking-start' || pathDrawMode === 'picking-end' ? (
+                                    <span style={{ fontFamily: IT, fontSize: '0.8rem', color: '#2A2A26' }}>Click two points on the map to connect them.</span>
+                                  ) : (
+                                    <span style={{ fontFamily: IT, fontSize: '0.68rem', fontWeight: 700, color: '#6A6A60', letterSpacing: '0.07em', textTransform: 'uppercase', paddingTop: 2 }}>
+                                      {pathDrawMode === 'choosing-style' ? 'Walkway style' : 'Material'}
+                                    </span>
+                                  )}
+                                  <button onClick={() => { setPathDrawMode('idle'); pathDrawStart.current = null; }}
+                                    style={{ fontFamily: IT, fontSize: '0.75rem', color: '#B0B0A6', background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 }}>✕</button>
+                                </div>
+                                {pathDrawMode === 'choosing-style' && (
+                                  <div className="flex gap-2">
+                                    {(['straight', 'winding'] as const).map(s => (
+                                      <button key={s} onClick={() => { setGlobalPathStyle(s); setPathDrawMode('choosing-material'); }}
+                                        className="flex-1 rounded-xl py-2 transition-all hover:opacity-80"
+                                        style={{ fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer', background: 'white', color: '#2A2A26', border: '1.5px solid rgba(42,42,38,0.12)' }}>
+                                        {s.charAt(0).toUpperCase() + s.slice(1)}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                                {pathDrawMode === 'choosing-material' && (
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {PATH_MATERIALS.map(m => (
+                                      <button key={m.id} onClick={() => { setGlobalPathMaterial(m.id); setPathDrawMode('picking-start'); }}
+                                        className="flex items-center gap-1.5 rounded-full px-3 py-1.5 transition-all hover:opacity-80"
+                                        style={{ fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, cursor: 'pointer', background: 'white', color: '#2A2A26', border: '1.5px solid rgba(42,42,38,0.12)' }}>
+                                        {m.label}
+                                        <span style={{ fontSize: '0.7rem', opacity: 0.6 }}>{m.price}</span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
                             )}
 
-                            {/* Walkway list */}
+                            {/* Walkway list — click to select & edit; style selector shows under the selected one */}
                             {paths.length > 0 && (
                               <div className="flex flex-col gap-1.5">
                                 <span style={{ fontFamily: IT, fontSize: '0.68rem', color: '#B0B0A6', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Walkways</span>
-                                {paths.map(p => {
-                                  const isEditing = selectedPathId === p.id;
-                                  const canRecalc = p.startId !== 'manual' && p.endId !== 'manual';
-                                  if (isEditing) {
-                                    return (
-                                      <div key={p.id} className="flex flex-col gap-2 rounded-xl p-3"
-                                        style={{ background: 'white', border: `1.5px solid ${PATH_COLOR}66` }}>
-                                        <div className="flex items-center gap-2">
-                                          <div style={{ width: 20, height: 3, borderRadius: 2, background: '#8C6B44', flexShrink: 0 }} />
-                                          <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26', flex: 1, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.label}</span>
-                                          <button onClick={() => setSelectedPathId(null)}
-                                            style={{ fontFamily: IT, fontSize: '0.7rem', color: '#9A9A92', background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 }}>Done</button>
-                                        </div>
-                                        <div className="flex gap-1.5">
-                                          {(['straight', 'winding'] as const).map(s => (
-                                            <button key={s}
-                                              onClick={() => {
-                                                if (p.startId === 'manual') {
-                                                  setPaths(prev => prev.map(x => x.id === p.id ? { ...x, style: s } : x));
-                                                  return;
-                                                }
-                                                const zones = zonesRef.current;
-                                                const csNow = csRef.current;
-                                                const dp = doorPointRef.current;
-                                                const getNodePt = (id: string): [number,number] | null => {
-                                                  if (id === 'door') return (dp && csNow) ? csNow.toXY(dp[0], dp[1]) : null;
-                                                  const z = zones.find(z => z.id === id);
-                                                  return z ? [z.xFt + z.wFt / 2, z.yFt + z.hFt / 2] : null;
-                                                };
-                                                const startPt = getNodePt(p.startId), endPt = getNodePt(p.endId);
-                                                const seed = p.id.split('').reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0, 0x811c9dc5);
-                                                setPaths(prev => prev.map(x => x.id === p.id
-                                                  ? { ...x, style: s, pts: startPt && endPt ? truncateAtObstacles(clipPathToBoundary(generatePathPts(startPt, endPt, s, seed), boundaryFtRef.current), obstacleFtRef.current) : x.pts }
-                                                  : x));
-                                              }}
-                                              className="flex-1 rounded-lg py-1.5 transition-all hover:opacity-80"
-                                              style={{
-                                                fontFamily: IT, fontSize: '0.73rem', fontWeight: 500, cursor: 'pointer',
-                                                background: p.style === s ? '#2A2A26' : 'rgba(42,42,38,0.06)',
-                                                color:      p.style === s ? '#efe9db' : '#2A2A26',
-                                                border:     p.style === s ? 'none'    : '1.5px solid rgba(42,42,38,0.12)',
-                                              }}>
-                                              {s.charAt(0).toUpperCase() + s.slice(1)}
-                                            </button>
-                                          ))}
-                                        </div>
-                                        {canRecalc && (
-                                          <button onClick={() => {
-                                            const zones = zonesRef.current;
-                                            const csNow = csRef.current;
-                                            const dp = doorPointRef.current;
-                                            const getNodePt = (id: string): [number,number] | null => {
-                                              if (id === 'door') return (dp && csNow) ? csNow.toXY(dp[0], dp[1]) : null;
-                                              const z = zones.find(z => z.id === id);
-                                              return z ? [z.xFt + z.wFt / 2, z.yFt + z.hFt / 2] : null;
-                                            };
-                                            const startPt = getNodePt(p.startId), endPt = getNodePt(p.endId);
-                                            if (!startPt || !endPt) return;
-                                            const seed = (Date.now() % 99991);
-                                            setPaths(prev => prev.map(x => x.id === p.id
-                                              ? { ...x, pts: truncateAtObstacles(clipPathToBoundary(generatePathPts(startPt, endPt, p.style, seed), boundaryFtRef.current), obstacleFtRef.current) }
-                                              : x));
-                                          }}
-                                          style={{ fontFamily: IT, fontSize: '0.73rem', color: '#2F6B4F', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0', textAlign: 'left' as const }}>
-                                            Recalculate route
-                                          </button>
-                                        )}
-                                        <button onClick={() => { setPaths(prev => prev.filter(x => x.id !== p.id)); setSelectedPathId(null); }}
-                                          style={{ fontFamily: IT, fontSize: '0.73rem', color: '#C05A3A', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0', textAlign: 'left' as const }}>
-                                          Remove walkway
-                                        </button>
-                                      </div>
-                                    );
-                                  }
-                                  return (
-                                    <div key={p.id}
-                                      onClick={() => setSelectedPathId(p.id)}
+                                {paths.map(p => (
+                                  <div key={p.id} className="flex flex-col gap-2" onClick={e => e.stopPropagation()}>
+                                    <div onClick={() => setSelectedPathId(selectedPathId === p.id ? null : p.id)}
                                       className="flex items-center gap-2 rounded-xl px-3 py-2 hover:opacity-80 transition-all"
-                                      style={{ background: 'rgba(42,42,38,0.06)', cursor: 'pointer' }}>
+                                      style={{ background: selectedPathId === p.id ? 'white' : 'rgba(42,42,38,0.06)', cursor: 'pointer', border: selectedPathId === p.id ? `1.5px solid ${PATH_COLOR}66` : '1.5px solid transparent' }}>
                                       <div style={{ width: 20, height: 3, borderRadius: 2, background: PATH_COLOR, flexShrink: 0 }} />
                                       <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.label}</span>
-                                      <span style={{ fontFamily: IT, fontSize: '0.65rem', color: '#B0B0A6' }}>{p.style}</span>
+                                      {selectedPathId !== p.id && <span style={{ fontFamily: IT, fontSize: '0.65rem', color: '#B0B0A6', whiteSpace: 'nowrap' }}>{p.style}{p.material ? ` - ${p.material}` : ''}</span>}
+                                      <button onClick={(e) => { e.stopPropagation(); setPaths(prev => prev.filter(x => x.id !== p.id)); if (selectedPathId === p.id) setSelectedPathId(null); }}
+                                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0, flexShrink: 0 }}>✕</button>
                                     </div>
-                                  );
-                                })}
+                                    {selectedPathId === p.id && (
+                                      <div className="flex flex-col gap-2.5 px-1">
+                                        <div className="flex flex-col gap-1.5">
+                                        <span style={{ fontFamily: IT, fontSize: '0.62rem', color: '#9A9A92', letterSpacing: '0.09em', textTransform: 'uppercase', fontWeight: 700 }}>Style</span>
+                                        <div className="flex gap-2">
+                                        {(['straight', 'winding'] as const).map(s => (
+                                          <button key={s}
+                                            onClick={() => {
+                                              setGlobalPathStyle(s);
+                                              setPaths(prev => prev.map(x => {
+                                                if (x.id !== p.id || x.pts.length < 2) return x;
+                                                const a = x.pts[0], b = x.pts[x.pts.length - 1];
+                                                const seed = x.id.split('').reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0, 0x811c9dc5);
+                                                return { ...x, style: s, pts: clipPathToBoundary(generatePathPts(a, b, s, seed), boundaryFtRef.current) };
+                                              }));
+                                            }}
+                                            className="flex-1 rounded-xl py-1.5 transition-all hover:opacity-80"
+                                            style={{
+                                              fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, cursor: 'pointer',
+                                              background: p.style === s ? '#2A2A26' : 'rgba(42,42,38,0.06)',
+                                              color:      p.style === s ? '#efe9db' : '#2A2A26',
+                                              border:     p.style === s ? 'none'    : '1.5px solid rgba(42,42,38,0.12)',
+                                            }}>
+                                            {s.charAt(0).toUpperCase() + s.slice(1)}
+                                          </button>
+                                        ))}
+                                        </div>
+                                        </div>
+                                        <div className="flex flex-col gap-1.5">
+                                        <span style={{ fontFamily: IT, fontSize: '0.62rem', color: '#9A9A92', letterSpacing: '0.09em', textTransform: 'uppercase', fontWeight: 700 }}>Material</span>
+                                        <div className="flex flex-wrap gap-1.5">
+                                          {PATH_MATERIALS.map(m => {
+                                            const on = p.material === m.id;
+                                            return (
+                                              <button key={m.id}
+                                                onClick={() => setPaths(prev => prev.map(x => x.id === p.id ? { ...x, material: m.id, widthFt: pathWidthForMaterial(m.id) } : x))}
+                                                className="flex items-center gap-1 rounded-full px-2.5 py-1 transition-all hover:opacity-80"
+                                                style={{ fontFamily: IT, fontSize: '0.72rem', fontWeight: 500, cursor: 'pointer',
+                                                  background: on ? '#2A2A26' : 'rgba(42,42,38,0.06)', color: on ? '#efe9db' : '#2A2A26', border: on ? 'none' : '1.5px solid rgba(42,42,38,0.12)' }}>
+                                                {m.label}<span style={{ fontSize: '0.66rem', opacity: 0.6, marginLeft: 3 }}>{m.price}</span>
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
                               </div>
                             )}
 
-                            <button onClick={() => advanceToNext('walkways')}
-                              className="mt-1 rounded-full py-2.5 hover:opacity-90 transition-all"
-                              style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-                              Continue →
-                            </button>
+                            <div className="flex items-center justify-end mt-1">
+                              <button onClick={() => advanceToNext('walkways')}
+                                className="rounded-full px-5 py-1.5 hover:opacity-90 transition-all"
+                                style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
+                                {paths.length > 0 ? 'Done →' : 'Skip →'}
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
@@ -1393,7 +2094,7 @@ export default function DiyPlacementPage() {
                             </span>
                             <div className="flex gap-2">
                               {(['mulch', 'rock'] as const).map(m => (
-                                <button key={m} onClick={() => setDefaultMaterial(m)}
+                                <button key={m} onClick={() => { setDefaultMaterial(m); setDefaultVariant(null); }}
                                   className="flex-1 flex items-center gap-2 rounded-xl py-2.5 px-3 transition-all hover:opacity-80"
                                   style={{
                                     fontFamily: IT, fontSize: '0.82rem', fontWeight: 500, cursor: 'pointer',
@@ -1403,157 +2104,188 @@ export default function DiyPlacementPage() {
                                   }}>
                                   <div style={{ width: 12, height: 12, borderRadius: 3, background: MATERIAL_COLOR[m], flexShrink: 0, opacity: defaultMaterial === m ? 0.8 : 1 }} />
                                   {m.charAt(0).toUpperCase() + m.slice(1)}
-                                  {m === 'mulch' && <span style={{ fontSize: '0.63rem', opacity: 0.6, marginLeft: 2 }}>default</span>}
+                                  {m === 'mulch' && (
+                                    <span
+                                      onMouseEnter={() => setRecTip(true)} onMouseLeave={() => setRecTip(false)}
+                                      style={{ position: 'relative', fontSize: '0.6rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.03em', marginLeft: 3, cursor: 'help' }}>
+                                      <span style={{ opacity: 0.65 }}>Recommended</span>
+                                      {recTip && (
+                                        <span style={{ position: 'absolute', top: 'calc(100% + 8px)', left: '50%', transform: 'translateX(-50%)', width: 230, background: '#2A2A26', color: '#efe9db', fontSize: '0.72rem', fontWeight: 400, textTransform: 'none', letterSpacing: 0, lineHeight: 1.45, padding: '8px 10px', borderRadius: 8, boxShadow: '0 6px 20px rgba(0,0,0,0.28)', zIndex: 50, textAlign: 'left', pointerEvents: 'none' }}>
+                                          Mulch is better for soil health — it retains moisture, feeds the soil as it breaks down, costs less, and reflects less heat than rock (less urban heat-island effect).
+                                        </span>
+                                      )}
+                                    </span>
+                                  )}
                                 </button>
                               ))}
                             </div>
-                          </div>
 
-                          {/* Add beds */}
-                          <div className="flex flex-col gap-2">
-                            <div className="flex items-center justify-between">
-                              <span style={{ fontFamily: IT, fontSize: '0.68rem', fontWeight: 700, color: '#6A6A60', letterSpacing: '0.07em', textTransform: 'uppercase' }}>
-                                Additional beds
-                              </span>
-                              {addingBed === null && (
-                                <button
-                                  onClick={() => setAddingBed({ step: 'type' })}
-                                  style={{ fontFamily: IT, fontSize: '1.1rem', lineHeight: 1, color: '#2A2A26', background: 'none', border: 'none', cursor: 'pointer', padding: '0 2px' }}>
-                                  +
-                                </button>
-                              )}
-                            </div>
-
-                            {addingBed !== null && (
-                              <div className="flex flex-col gap-2.5 rounded-xl p-3" style={{ background: 'rgba(42,42,38,0.06)', border: '1.5px solid rgba(42,42,38,0.12)' }}>
-                                <div className="flex items-center justify-between">
-                                  <span style={{ fontFamily: IT, fontSize: '0.75rem', fontWeight: 600, color: '#2A2A26' }}>
-                                    {addingBed.step === 'type'     ? 'Type of bed'    :
-                                     addingBed.step === 'material' ? 'Material'        :
-                                                                     'Draw on the map'}
-                                  </span>
-                                  <button
-                                    onClick={() => { setAddingBed(null); bedDrawVertsRef.current = []; bedDrawCursorRef.current = null; draw(); }}
-                                    style={{ fontFamily: IT, fontSize: '0.7rem', color: '#B0B0A6', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
-                                    ✕
-                                  </button>
+                            {/* Variant of the chosen material — fills the yard's open ground */}
+                            {(defaultMaterial === 'mulch' || defaultMaterial === 'rock') && (
+                              <div className="flex flex-col gap-1.5 mt-2.5">
+                                <span style={{ fontFamily: IT, fontSize: '0.62rem', color: '#9A9A92', letterSpacing: '0.09em', textTransform: 'uppercase', fontWeight: 700 }}>
+                                  {defaultMaterial === 'rock' ? 'Rock type' : 'Mulch color'}
+                                </span>
+                                <div className="flex flex-wrap gap-1.5">
+                                {variantsFor(defaultMaterial).map(v => {
+                                  const active = defaultVariant === v.id;
+                                  return (
+                                    <button key={v.id} onClick={() => setDefaultVariant(v.id)}
+                                      className="flex items-center gap-1.5 rounded-full px-3 py-1.5 transition-all hover:opacity-80"
+                                      style={{ fontFamily: IT, fontSize: '0.76rem', fontWeight: 500, cursor: 'pointer',
+                                        background: active ? '#2A2A26' : 'white', color: active ? '#efe9db' : '#2A2A26',
+                                        border: active ? 'none' : '1.5px solid rgba(42,42,38,0.12)' }}>
+                                      <div style={{ width: 11, height: 11, borderRadius: '50%', background: v.color, flexShrink: 0, boxShadow: active ? '0 0 0 1.5px rgba(255,255,255,0.5)' : 'none' }} />
+                                      {v.label}
+                                    </button>
+                                  );
+                                })}
                                 </div>
-
-                                {addingBed.step === 'type' && (
-                                  <div className="flex gap-2">
-                                    {([
-                                      { type: 'planted'   as const, label: 'Planted bed'    },
-                                      { type: 'unplanted' as const, label: 'Unplanted area' },
-                                    ]).map(({ type, label }) => (
-                                      <button key={type}
-                                        onClick={() => setAddingBed({ step: 'material', type })}
-                                        className="flex-1 rounded-xl py-2 transition-all hover:opacity-80"
-                                        style={{ fontFamily: IT, fontSize: '0.76rem', fontWeight: 500, cursor: 'pointer', background: 'white', color: '#2A2A26', border: '1.5px solid rgba(42,42,38,0.12)' }}>
-                                        {label}
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
-
-                                {addingBed.step === 'material' && (
-                                  <div className="flex gap-2">
-                                    {(['mulch', 'rock'] as const).map(m => (
-                                      <button key={m}
-                                        onClick={() => setAddingBed({ ...addingBed, step: 'draw', material: m })}
-                                        className="flex-1 flex items-center gap-2 rounded-xl py-2 px-3 transition-all hover:opacity-80"
-                                        style={{ fontFamily: IT, fontSize: '0.76rem', fontWeight: 500, cursor: 'pointer', background: 'white', color: '#2A2A26', border: '1.5px solid rgba(42,42,38,0.12)' }}>
-                                        <div style={{ width: 10, height: 10, borderRadius: 2, background: MATERIAL_COLOR[m], flexShrink: 0 }} />
-                                        {m.charAt(0).toUpperCase() + m.slice(1)}
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
-
-                                {addingBed.step === 'draw' && (
-                                  <div>
-                                    <p style={{ fontFamily: IT, fontSize: '0.76rem', color: '#6A6A60', margin: '0 0 0.5rem', lineHeight: 1.55 }}>
-                                      Click to place points. Double-click to close the shape.
-                                    </p>
-                                    <div className="flex items-center gap-2 mb-1">
-                                      <div style={{ width: 10, height: 10, borderRadius: 2, background: MATERIAL_COLOR[addingBed.material ?? 'mulch'], flexShrink: 0 }} />
-                                      <span style={{ fontFamily: IT, fontSize: '0.72rem', color: '#9A9A92' }}>
-                                        {(addingBed.material ?? 'mulch').charAt(0).toUpperCase() + (addingBed.material ?? 'mulch').slice(1)} · {addingBed.type === 'planted' ? 'planted' : 'unplanted'}
-                                      </span>
-                                    </div>
-                                    {bedDrawVertsRef.current.length > 0 && (
-                                      <span style={{ fontFamily: IT, fontSize: '0.68rem', color: '#B0B0A6' }}>
-                                        {bedDrawVertsRef.current.length} point{bedDrawVertsRef.current.length !== 1 ? 's' : ''} placed
-                                        {bedDrawVertsRef.current.length >= 3 ? ' — double-click to close' : ''}
-                                      </span>
-                                    )}
-                                  </div>
-                                )}
                               </div>
                             )}
                           </div>
 
-                          {/* Bed list */}
-                          {placedBeds.length > 0 && (
-                            <div className="flex flex-col gap-1.5">
-                              <span style={{ fontFamily: IT, fontSize: '0.68rem', color: '#B0B0A6', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Placed beds</span>
-                              {placedBeds.map(b => (
-                                <div key={b.id}
-                                  onClick={() => { selBedRef.current = b.id; setSelectedBedId(b.id); selRef.current = null; setSelectedId(null); }}
-                                  className="flex items-center gap-2 rounded-xl px-3 py-2 hover:opacity-80 transition-all"
-                                  style={{ background: selectedBedId === b.id ? 'white' : 'rgba(42,42,38,0.06)', cursor: 'pointer', border: selectedBedId === b.id ? `1.5px solid ${MATERIAL_COLOR[b.material]}55` : '1.5px solid transparent' }}>
-                                  <div style={{ width: 12, height: 12, borderRadius: b.shape === 'circle' ? '50%' : 3, background: MATERIAL_COLOR[b.material], flexShrink: 0 }} />
-                                  <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26', flex: 1 }}>{b.label}</span>
-                                  <span style={{ fontFamily: IT, fontSize: '0.65rem', color: '#B0B0A6' }}>{b.material}</span>
-                                  <button onClick={(e) => { e.stopPropagation(); setPlacedBeds(prev => prev.filter(x => x.id !== b.id)); if (selectedBedId === b.id) { selBedRef.current = null; setSelectedBedId(null); } }}
-                                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0 }}>✕</button>
+                          {/* Add secondary planting beds — staged like the walkway flow */}
+                          {addingBed === null ? (
+                            <button onClick={() => setAddingBed({ step: 'type' })}
+                              className="flex items-center justify-between gap-2 rounded-xl px-3 py-2.5 hover:opacity-80 transition-all"
+                              style={{ width: '100%', background: 'rgba(42,42,38,0.04)', border: '1.5px dashed rgba(42,42,38,0.18)', cursor: 'pointer' }}>
+                              <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500 }}>Add secondary planting beds</span>
+                              <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 22, height: 22, borderRadius: '50%', background: '#2A2A26', color: '#efe9db', fontSize: '1rem', lineHeight: 1, flexShrink: 0 }}>+</span>
+                            </button>
+                          ) : (
+                            <div className="flex flex-col gap-2 rounded-xl px-3 py-3" style={{ background: 'rgba(42,42,38,0.06)', border: '1.5px solid rgba(42,42,38,0.12)' }}>
+                              <div className="flex items-start justify-between gap-2">
+                                {addingBed.step === 'draw' ? (
+                                  <span style={{ fontFamily: IT, fontSize: '0.8rem', color: '#2A2A26' }}>Click to place points on the map. Double-click to close the shape.</span>
+                                ) : (
+                                  <span style={{ fontFamily: IT, fontSize: '0.68rem', fontWeight: 700, color: '#6A6A60', letterSpacing: '0.07em', textTransform: 'uppercase', paddingTop: 2 }}>
+                                    {addingBed.step === 'type' ? 'Type' : addingBed.step === 'material' ? 'Material' : (addingBed.material === 'rock' ? 'Rock type' : 'Color')}
+                                  </span>
+                                )}
+                                <button onClick={() => { setAddingBed(null); bedDrawVertsRef.current = []; bedDrawCursorRef.current = null; draw(); }}
+                                  style={{ fontFamily: IT, fontSize: '0.75rem', color: '#B0B0A6', background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 }}>✕</button>
+                              </div>
+                              {addingBed.step === 'type' && (
+                                <div className="flex gap-2">
+                                  {([{ type: 'planted' as const, label: 'Planted bed' }, { type: 'unplanted' as const, label: 'Unplanted area' }]).map(({ type, label }) => (
+                                    <button key={type} onClick={() => setAddingBed({ step: 'material', type })}
+                                      className="flex-1 rounded-xl py-2 transition-all hover:opacity-80"
+                                      style={{ fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, cursor: 'pointer', background: 'white', color: '#2A2A26', border: '1.5px solid rgba(42,42,38,0.12)' }}>
+                                      {label}
+                                    </button>
+                                  ))}
                                 </div>
-                              ))}
+                              )}
+                              {addingBed.step === 'material' && (
+                                <div className="flex gap-2">
+                                  {(['mulch', 'rock'] as const).map(m => (
+                                    <button key={m} onClick={() => setAddingBed({ ...addingBed, step: 'variant', material: m })}
+                                      className="flex-1 flex items-center gap-2 rounded-xl py-2 px-3 transition-all hover:opacity-80"
+                                      style={{ fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, cursor: 'pointer', background: 'white', color: '#2A2A26', border: '1.5px solid rgba(42,42,38,0.12)' }}>
+                                      <div style={{ width: 10, height: 10, borderRadius: 2, background: MATERIAL_COLOR[m], flexShrink: 0 }} />
+                                      {m.charAt(0).toUpperCase() + m.slice(1)}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                              {addingBed.step === 'variant' && addingBed.material && (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {variantsFor(addingBed.material).map(v => (
+                                    <button key={v.id} onClick={() => setAddingBed({ ...addingBed, step: 'draw', variant: v.id })}
+                                      className="flex items-center gap-1.5 rounded-full px-3 py-1.5 transition-all hover:opacity-80"
+                                      style={{ fontFamily: IT, fontSize: '0.76rem', fontWeight: 500, cursor: 'pointer', background: 'white', color: '#2A2A26', border: '1.5px solid rgba(42,42,38,0.12)' }}>
+                                      <div style={{ width: 11, height: 11, borderRadius: '50%', background: v.color, flexShrink: 0 }} />
+                                      {v.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           )}
 
-                          <button onClick={() => advanceToNext('materials')}
-                            className="rounded-full py-2.5 hover:opacity-90 transition-all"
-                            style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-                            Continue →
-                          </button>
-                        </div>
-                      </div>
-                    )}
+                          {/* Bed list (lawn areas live on the Lawn step) */}
+                          {placedBeds.filter(b => b.material !== 'lawn').length > 0 && (
+                            <div className="flex flex-col gap-1.5">
+                              <span style={{ fontFamily: IT, fontSize: '0.68rem', color: '#B0B0A6', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Secondary beds</span>
+                              {placedBeds.filter(b => b.material !== 'lawn').map(b => {
+                                const open = selectedBedId === b.id;
+                                const bedLabelStyle: React.CSSProperties = { fontFamily: IT, fontSize: '0.62rem', color: '#9A9A92', letterSpacing: '0.09em', textTransform: 'uppercase', fontWeight: 700 };
+                                return (
+                                <div key={b.id} className="flex flex-col gap-2">
+                                  <div onClick={() => { const on = open; selBedRef.current = on ? null : b.id; setSelectedBedId(on ? null : b.id); selRef.current = null; setSelectedId(null); }}
+                                    className="flex items-center gap-2 rounded-xl px-3 py-2 hover:opacity-80 transition-all"
+                                    style={{ background: open ? 'white' : 'rgba(42,42,38,0.06)', cursor: 'pointer', border: open ? `1.5px solid ${(b.variant ? VARIANT_COLOR[b.variant] : MATERIAL_COLOR[b.material])}55` : '1.5px solid transparent' }}>
+                                    <div style={{ width: 12, height: 12, borderRadius: b.shape === 'circle' ? '50%' : 3, background: b.variant ? VARIANT_COLOR[b.variant] : MATERIAL_COLOR[b.material], flexShrink: 0 }} />
+                                    <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26', flex: 1 }}>{b.label}</span>
+                                    {!open && <span style={{ fontFamily: IT, fontSize: '0.65rem', color: '#B0B0A6' }}>{b.type === 'planted' ? 'Planted' : 'Unplanted'}{b.variant ? ` · ${VARIANT_LABEL[b.variant]}` : ''}</span>}
+                                    <button onClick={(e) => { e.stopPropagation(); setPlacedBeds(prev => prev.filter(x => x.id !== b.id)); if (open) { selBedRef.current = null; setSelectedBedId(null); } }}
+                                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0 }}>✕</button>
+                                  </div>
+                                  {open && (
+                                    <div className="flex flex-col gap-2.5 px-1 pb-1">
+                                      <div className="flex flex-col gap-1.5">
+                                        <span style={bedLabelStyle}>Type</span>
+                                        <div className="flex gap-2">
+                                          {([{ t: 'planted' as const, l: 'Planted bed' }, { t: 'unplanted' as const, l: 'Unplanted area' }]).map(o => {
+                                            const on = b.type === o.t;
+                                            return (
+                                              <button key={o.t} onClick={() => updateBed(b.id, { type: o.t })}
+                                                className="flex-1 rounded-xl py-2 transition-all hover:opacity-80"
+                                                style={{ fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, cursor: 'pointer',
+                                                  background: on ? '#2A2A26' : 'white', color: on ? '#efe9db' : '#2A2A26', border: on ? 'none' : '1.5px solid rgba(42,42,38,0.12)' }}>
+                                                {o.l}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                      <div className="flex flex-col gap-1.5">
+                                        <span style={bedLabelStyle}>Material</span>
+                                        <div className="flex gap-2">
+                                          {(['mulch', 'rock'] as const).map(m => {
+                                            const on = b.material === m;
+                                            return (
+                                              <button key={m} onClick={() => updateBed(b.id, { material: m, variant: GROUND_VARIANTS[m][0].id })}
+                                                className="flex-1 flex items-center gap-2 rounded-xl py-2 px-3 transition-all hover:opacity-80"
+                                                style={{ fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, cursor: 'pointer',
+                                                  background: on ? '#2A2A26' : 'white', color: on ? '#efe9db' : '#2A2A26', border: on ? 'none' : '1.5px solid rgba(42,42,38,0.12)' }}>
+                                                <div style={{ width: 10, height: 10, borderRadius: 2, background: MATERIAL_COLOR[m], flexShrink: 0 }} />
+                                                {m.charAt(0).toUpperCase() + m.slice(1)}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                      <div className="flex flex-col gap-1.5">
+                                        <span style={bedLabelStyle}>{b.material === 'rock' ? 'Rock type' : 'Color'}</span>
+                                        <div className="flex flex-wrap gap-1.5">
+                                          {variantsFor(b.material).map(v => {
+                                            const on = b.variant === v.id;
+                                            return (
+                                              <button key={v.id} onClick={() => updateBed(b.id, { variant: v.id })}
+                                                className="flex items-center gap-1 rounded-full px-2.5 py-1 transition-all hover:opacity-80"
+                                                style={{ fontFamily: IT, fontSize: '0.72rem', fontWeight: 500, cursor: 'pointer',
+                                                  background: on ? '#2A2A26' : 'rgba(42,42,38,0.06)', color: on ? '#efe9db' : '#2A2A26', border: on ? 'none' : '1.5px solid rgba(42,42,38,0.12)' }}>
+                                                <div style={{ width: 10, height: 10, borderRadius: '50%', background: v.color, flexShrink: 0, boxShadow: on ? '0 0 0 1.5px rgba(255,255,255,0.5)' : 'none' }} />
+                                                {v.label}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                                );
+                              })}
+                            </div>
+                          )}
 
-                    {/* ── Lawn ── */}
-                    {stepId === 'lawn' && isOpen && (
-                      <div className="px-5 pb-4" style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
-                        <div className="pt-3 flex flex-col gap-3">
-                          <div className="rounded-xl p-3 flex gap-6" style={{ background: 'rgba(42,42,38,0.06)' }}>
-                            <div className="flex flex-col gap-0.5">
-                              <span style={{ fontFamily: IT, fontSize: '0.63rem', color: '#9A9A92', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Open lawn</span>
-                              <span style={{ fontFamily: IS, fontSize: '1.35rem', color: '#2A2A26', lineHeight: 1.1 }}>{lawnPct}%</span>
-                              <span style={{ fontFamily: IT, fontSize: '0.66rem', color: '#9A9A92' }}>{lawnAreaFt.toLocaleString()} sq ft</span>
-                            </div>
-                            <div className="flex flex-col gap-0.5">
-                              <span style={{ fontFamily: IT, fontSize: '0.63rem', color: '#9A9A92', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Features</span>
-                              <span style={{ fontFamily: IS, fontSize: '1.35rem', color: '#2A2A26', lineHeight: 1.1 }}>{100 - lawnPct}%</span>
-                              <span style={{ fontFamily: IT, fontSize: '0.66rem', color: '#9A9A92' }}>{zoneAreaFt.toLocaleString()} sq ft</span>
-                            </div>
-                          </div>
-                          {lawnAmount === 'lot' && lawnPct < 40 && (
-                            <div style={{ borderRadius: 10, padding: '0.65rem 0.85rem', background: '#FEF3C7', border: '1px solid #F59E0B' }}>
-                              <p style={{ fontFamily: IT, fontSize: '0.76rem', color: '#92400E', margin: 0, lineHeight: 1.5 }}>
-                                Your features are using more space than expected — lawn is about {lawnPct}% of the yard. Remove or resize features on the map to make more room.
-                              </p>
-                            </div>
-                          )}
-                          {lawnAmount === 'some' && (
-                            <p style={{ fontFamily: IT, fontSize: '0.78rem', color: '#9A9A92', margin: 0, lineHeight: 1.5 }}>
-                              {lawnPct >= 20
-                                ? 'That looks like a comfortable amount of open space.'
-                                : "If you'd like more open space, remove or resize features on the map."}
-                            </p>
-                          )}
-                          <button onClick={() => advanceToNext('lawn')}
-                            className="rounded-full py-2.5 hover:opacity-90 transition-all"
-                            style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-                            Continue →
+                          <button onClick={() => { setDoneSteps(prev => new Set([...prev, 'materials'])); setOpenStep(null); }}
+                            className="self-end mt-1 rounded-full px-5 py-1.5 hover:opacity-90 transition-all"
+                            style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
+                            Done
                           </button>
                         </div>
                       </div>
@@ -1613,8 +2345,8 @@ export default function DiyPlacementPage() {
             {isLoaded && (
               <GoogleMap
                 mapContainerStyle={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
-                center={mapCenter}
-                zoom={20}
+                center={mapView.center}
+                zoom={mapView.zoom}
                 options={{
                   mapTypeId: 'satellite',
                   disableDefaultUI: true,
@@ -1622,10 +2354,18 @@ export default function DiyPlacementPage() {
                   clickableIcons: false,
                   draggable: false,
                   disableDoubleClickZoom: true,
-                  scrollwheel: true,
+                  scrollwheel: false,
                   zoomControl: false,
                 }}
-                onLoad={map => { mapRef.current = map; }}
+                onLoad={map => {
+                  mapRef.current = map;
+                  const ov = new google.maps.OverlayView();
+                  ov.onAdd = () => {};
+                  ov.onRemove = () => {};
+                  ov.draw = () => { recomputeAffine(); };
+                  ov.setMap(map);
+                  overlayRef.current = ov;
+                }}
               >
                 {boundary.length >= 3 && (
                   <Polygon
@@ -1660,198 +2400,15 @@ export default function DiyPlacementPage() {
               onDragLeave={handleCanvasDragLeave}
             />
 
-            {/* Bed selection panel */}
-            {!selectedZone && selectedBedId && (() => {
-              const bed = placedBeds.find(b => b.id === selectedBedId);
-              if (!bed) return null;
-              const bedShapes: { key: 'rect' | 'circle' | 'organic'; label: string }[] = [
-                { key: 'rect',    label: 'Rectangle' },
-                { key: 'circle',  label: 'Circle'    },
-                { key: 'organic', label: 'Organic'   },
-              ];
-              const updateBed = (patch: Partial<PlacedBed>) => {
-                const updated = bedsRef.current.map(b => b.id === selectedBedId ? { ...b, ...patch } : b);
-                bedsRef.current = updated;
-                setPlacedBeds(updated);
-              };
-              return (
-                <div className="absolute z-20 flex flex-col rounded-3xl p-5"
-                  style={{ top: 12, right: 12, background: 'white', boxShadow: '0 4px 24px rgba(0,0,0,0.10)', width: 270, gap: 0 }}>
-                  <div className="flex items-center gap-2 mb-3">
-                    <div style={{ width: 16, height: 16, borderRadius: 4, background: MATERIAL_COLOR[bed.material], flexShrink: 0 }} />
-                    <span style={{ fontFamily: IT, fontSize: '0.65rem', color: '#7A7A70', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700 }}>
-                      {bed.type === 'planted' ? 'Planted bed' : 'Unplanted area'}
-                    </span>
-                  </div>
-                  <h3 style={{ fontFamily: IS, fontSize: '1.55rem', color: '#2A2A26', margin: '0 0 12px', fontWeight: 400, lineHeight: 1 }}>
-                    {bed.label}
-                  </h3>
-                  <div style={{ borderTop: '1px solid rgba(42,42,38,0.1)', marginBottom: 16 }} />
-                  {bed.shape !== 'poly' && (
-                    <>
-                      <span style={{ fontFamily: IT, fontSize: '0.62rem', color: '#9A9A92', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700, marginBottom: 10, display: 'block' }}>
-                        Shape
-                      </span>
-                      <div className="flex gap-2 mb-4">
-                        {bedShapes.map(s => {
-                          const active = bed.shape === s.key;
-                          return (
-                            <button key={s.key} onClick={() => updateBed({ shape: s.key })}
-                              className="flex-1 flex flex-col items-center justify-center gap-2 rounded-2xl py-3 hover:opacity-80 transition-all"
-                              style={{
-                                border:     active ? `2px solid ${MATERIAL_COLOR[bed.material]}` : '1.5px solid rgba(42,42,38,0.12)',
-                                background: active ? MATERIAL_COLOR[bed.material] + '18' : 'transparent',
-                                cursor:     'pointer',
-                              }}>
-                              <div style={{
-                                width:        s.key === 'circle' ? 26 : 28,
-                                height:       s.key === 'circle' ? 26 : 22,
-                                borderRadius: s.key === 'circle' ? '50%' : s.key === 'organic' ? '62% 38% 55% 45% / 55% 48% 52% 45%' : 4,
-                                background:   MATERIAL_COLOR[bed.material],
-                              }} />
-                              <span style={{ fontFamily: IT, fontSize: '0.68rem', color: '#2A2A26', fontWeight: 500 }}>{s.label}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </>
-                  )}
-                  <span style={{ fontFamily: IT, fontSize: '0.62rem', color: '#9A9A92', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700, marginBottom: 10, display: 'block' }}>
-                    Material
-                  </span>
-                  <div className="flex gap-2 mb-4">
-                    {(['mulch', 'rock'] as const).map(m => (
-                      <button key={m} onClick={() => updateBed({ material: m })}
-                        className="flex-1 flex items-center gap-2 rounded-xl py-2 px-3 transition-all hover:opacity-80"
-                        style={{
-                          fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, cursor: 'pointer',
-                          background: bed.material === m ? '#2A2A26' : 'rgba(42,42,38,0.06)',
-                          color:      bed.material === m ? '#efe9db' : '#2A2A26',
-                          border:     bed.material === m ? 'none'    : '1.5px solid rgba(42,42,38,0.12)',
-                        }}>
-                        <div style={{ width: 10, height: 10, borderRadius: 2, background: bed.material === m ? 'white' : MATERIAL_COLOR[m], flexShrink: 0 }} />
-                        {m.charAt(0).toUpperCase() + m.slice(1)}
-                      </button>
-                    ))}
-                  </div>
-                  {bed.shape === 'poly' && bed.verts ? (() => {
-                    let area = 0;
-                    for (let i = 0; i < bed.verts.length; i++) {
-                      const j = (i + 1) % bed.verts.length;
-                      area += bed.verts[i][0] * bed.verts[j][1] - bed.verts[j][0] * bed.verts[i][1];
-                    }
-                    return (
-                      <div className="flex items-center justify-between mb-3">
-                        <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60' }}>Area</span>
-                        <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#2A2A26', fontWeight: 700 }}>{Math.round(Math.abs(area / 2))} sq ft</span>
-                      </div>
-                    );
-                  })() : (
-                    <>
-                      <div className="flex items-center justify-between mb-2">
-                        <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60' }}>Dimensions</span>
-                        <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#2A2A26', fontWeight: 700 }}>
-                          {Math.round(bed.wFt)} × {Math.round(bed.hFt)} ft
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between mb-3">
-                        <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60' }}>Area</span>
-                        <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#2A2A26', fontWeight: 700 }}>{Math.round(bed.wFt * bed.hFt)} sq ft</span>
-                      </div>
-                    </>
-                  )}
-                  <p style={{ fontFamily: IT, fontSize: '0.73rem', color: '#9A9A92', margin: '0 0 14px', lineHeight: 1.55 }}>
-                    {bed.shape === 'poly' ? 'Drag to reposition.' : 'Drag to reposition. Drag the corner handle to resize.'}
-                  </p>
-                  <button
-                    onClick={() => {
-                      const updated = bedsRef.current.filter(b => b.id !== selectedBedId);
-                      bedsRef.current   = updated;
-                      selBedRef.current = null;
-                      setPlacedBeds(updated);
-                      setSelectedBedId(null);
-                    }}
-                    className="w-full py-2.5 rounded-xl hover:opacity-90 transition-all"
-                    style={{ background: '#F8EDE8', color: '#C05A3A', fontFamily: IT, fontSize: '0.82rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-                    Remove from plan
-                  </button>
-                </div>
-              );
-            })()}
+            {/* Instruction shown at the top of the map (active feature hint, or lawn guidance) */}
+            {topBanner && (
+              <div className="absolute px-5 py-2.5 rounded-2xl"
+                style={{ top: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 10, background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, boxShadow: '0 4px 16px rgba(0,0,0,0.35)', maxWidth: 'min(520px, calc(100% - 32px))', textAlign: 'center', lineHeight: 1.45 }}>
+                {topBanner}
+              </div>
+            )}
 
-            {/* Zone selection panel */}
-            {selectedZone && (() => {
-              const shapes: { key: ZoneShape; label: string; icon: React.ReactNode }[] = [
-                { key: 'rect',    label: 'Rectangle', icon: <div style={{ width: 28, height: 22, borderRadius: 4, background: selectedZone.color }} /> },
-                { key: 'circle',  label: 'Circle',    icon: <div style={{ width: 26, height: 26, borderRadius: '50%', background: selectedZone.color }} /> },
-                { key: 'organic', label: 'Organic',   icon: <div style={{ width: 28, height: 28, borderRadius: '62% 38% 55% 45% / 55% 48% 52% 45%', background: selectedZone.color }} /> },
-              ];
-              const setShape = (s: ZoneShape) => {
-                const updated = zonesRef.current.map(z => z.id === selectedZone.id ? { ...z, shape: s } : z);
-                zonesRef.current = updated;
-                setPlacedZones(updated);
-              };
-              return (
-                <div className="absolute z-20 flex flex-col rounded-3xl p-5"
-                  style={{ top: 12, right: 12, background: 'white', boxShadow: '0 4px 24px rgba(0,0,0,0.10)', width: 270, gap: 0 }}>
-                  <div className="flex items-center gap-2 mb-3">
-                    <div style={{ width: 16, height: 16, borderRadius: 4, background: selectedZone.color, flexShrink: 0 }} />
-                    <span style={{ fontFamily: IT, fontSize: '0.65rem', color: '#7A7A70', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700 }}>
-                      {selectedZone.label}
-                    </span>
-                  </div>
-                  <h3 style={{ fontFamily: IS, fontSize: '1.55rem', color: '#2A2A26', margin: '0 0 12px', fontWeight: 400, lineHeight: 1 }}>
-                    {selectedZone.label}
-                  </h3>
-                  <div style={{ borderTop: '1px solid rgba(42,42,38,0.1)', marginBottom: 16 }} />
-                  <span style={{ fontFamily: IT, fontSize: '0.62rem', color: '#9A9A92', letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 700, marginBottom: 10, display: 'block' }}>
-                    Shape
-                  </span>
-                  <div className="flex gap-2 mb-4">
-                    {shapes.map(s => {
-                      const active = selectedZone.shape === s.key;
-                      return (
-                        <button key={s.key} onClick={() => setShape(s.key)}
-                          className="flex-1 flex flex-col items-center justify-center gap-2 rounded-2xl py-3 hover:opacity-80 transition-all"
-                          style={{
-                            border:     active ? `2px solid ${selectedZone.color}` : '1.5px solid rgba(42,42,38,0.12)',
-                            background: active ? selectedZone.color + '12' : 'transparent',
-                            cursor:     'pointer',
-                          }}>
-                          {s.icon}
-                          <span style={{ fontFamily: IT, fontSize: '0.68rem', color: '#2A2A26', fontWeight: 500 }}>{s.label}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="flex items-center justify-between mb-2">
-                    <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60' }}>Dimensions</span>
-                    <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#2A2A26', fontWeight: 700 }}>
-                      {Math.round(selectedZone.wFt)} × {Math.round(selectedZone.hFt)} ft
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between mb-3">
-                    <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60' }}>Area</span>
-                    <span style={{ fontFamily: IT, fontSize: '0.82rem', color: '#2A2A26', fontWeight: 700 }}>{areaSqFt} sq ft</span>
-                  </div>
-                  <p style={{ fontFamily: IT, fontSize: '0.73rem', color: '#9A9A92', margin: '0 0 14px', lineHeight: 1.55 }}>
-                    Drag inside to reposition. We'll set sun &amp; plants next.
-                  </p>
-                  <button
-                    onClick={() => {
-                      const updated = zonesRef.current.filter(z => z.id !== selectedId);
-                      zonesRef.current = updated;
-                      selRef.current   = null;
-                      setPlacedZones(updated);
-                      setSelectedId(null);
-                    }}
-                    className="w-full py-2.5 rounded-xl hover:opacity-90 transition-all"
-                    style={{ background: '#F8EDE8', color: '#C05A3A', fontFamily: IT, fontSize: '0.82rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-                    Remove from plan
-                  </button>
-                </div>
-              );
-            })()}
+
           </div>
         </div>
       </div>
@@ -1862,10 +2419,10 @@ export default function DiyPlacementPage() {
         style={{ color: '#7A7A73', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
         ← back
       </button>
-      <button onClick={() => navigate('/diy/plan')}
+      <button onClick={() => navigate('/diy/review')}
         className="fixed bottom-8 right-10 flex items-center gap-2.5 px-7 py-3.5 rounded-full transition-all hover:opacity-90"
         style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-        Continue to plants →
+        Review your plan →
       </button>
     </div>
   );

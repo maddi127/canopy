@@ -332,13 +332,6 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
               );
             })}
           </div>
-          <div className="flex justify-center" style={{ marginTop: '1.25rem' }}>
-            <button onClick={() => { setSelectedFeatures([]); setStep(5 as Step); }}
-              className="rounded-full transition-all hover:opacity-80"
-              style={{ padding: '10px 22px', background: 'none', border: '1.5px solid rgba(26,26,22,0.25)', cursor: 'pointer', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, color: '#5A5A50' }}>
-              None of these →
-            </button>
-          </div>
         </div>
       )}
 
@@ -440,7 +433,13 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
             style={{ backgroundColor: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500 }}>
             {primaryLabel}
           </button>
-        ) : step === 4 ? null : (
+        ) : step === 4 ? (
+          <button onClick={() => { setSelectedFeatures([]); setStep(5 as Step); }}
+            className="fixed bottom-8 right-10 transition-all hover:opacity-70"
+            style={{ color: '#A8A8A0', fontFamily: IT, fontSize: '0.85rem' }}>
+            None of these →
+          </button>
+        ) : (
           <button onClick={onClick}
             className="fixed bottom-8 right-10 transition-all hover:opacity-70"
             style={{ color: '#A8A8A0', fontFamily: IT, fontSize: '0.85rem' }}>
