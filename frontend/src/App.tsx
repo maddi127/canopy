@@ -25,6 +25,10 @@ import DiyPlantSelectPage    from './pages/DiyPlantSelectPage';
 import DiyLayoutPage         from './pages/DiyLayoutPage';
 import DiyPlacementPage      from './pages/DiyPlacementPage';
 import DiyReviewPage         from './pages/DiyReviewPage';
+import DiyPlantsPage         from './pages/DiyPlantsPage';
+import Yard3DPage            from './pages/Yard3DPage';
+import DiyAutoLayoutPage     from './pages/DiyAutoLayoutPage';
+import DiySiteRevealPage     from './pages/DiySiteRevealPage';
 
 const queryClient = new QueryClient();
 
@@ -57,7 +61,11 @@ function App() {
                 <Route path="/diy/render"          element={<DiyFinalRenderPage />} />
                 <Route path="/diy/layout"          element={<DiyLayoutPage />} />
                 <Route path="/diy/placement"       element={<DiyPlacementPage />} />
+                <Route path="/diy/auto-layout"     element={<DiyAutoLayoutPage />} />
+                <Route path="/diy/site-reveal"     element={<DiySiteRevealPage />} />
                 <Route path="/diy/review"          element={<DiyReviewPage />} />
+                <Route path="/diy/plant-options"   element={<DiyPlantsPage />} />
+                <Route path="/diy/yard-3d"         element={<Yard3DPage />} />
                 <Route path="/diy/plan"            element={<DiyPlanPage />} />
               </Route>
             </Routes>

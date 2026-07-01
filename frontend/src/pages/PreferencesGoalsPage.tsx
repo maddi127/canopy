@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Leaf, Star, Flower2, Heart, Droplets, Shield, Armchair, UtensilsCrossed, Flame, Waves, Sprout, Package, Upload, X } from 'lucide-react';
+import { Leaf, Star, Flower2, Heart, Droplets, Shield, TreePine, Armchair, UtensilsCrossed, Flame, Waves, Sprout, Package, Upload, X } from 'lucide-react';
 import Logo from '../components/Logo';
 import AppStepper from '../components/AppStepper';
 
@@ -28,6 +28,7 @@ const ALL_GOALS = [
   { id: 'kid_pet',         label: 'Kid or pet friendly', icon: Heart    },
   { id: 'low_water',       label: 'Low water usage',     icon: Droplets },
   { id: 'privacy',         label: 'Privacy',             icon: Shield   },
+  { id: 'shade',           label: 'Shade',               icon: TreePine },
 ];
 
 const ALL_FEATURES = [
@@ -41,8 +42,8 @@ const ALL_FEATURES = [
 
 const LAWN_OPTIONS = [
   { id: 'none', label: 'None',    value: 0,    desc: 'Only planted areas and hardscapes'  },
-  { id: 'some', label: 'Some',    value: 0.25, desc: 'A modest open area for pets or kids' },
-  { id: 'lot',  label: 'A lot',   value: 0.50, desc: 'Lawn is a central part of the yard' },
+  { id: 'some', label: 'Some',    value: 0.33, desc: 'A modest open area for pets or kids' },
+  { id: 'lot',  label: 'A lot',   value: 0.67, desc: 'Lawn is a central part of the yard' },
 ];
 
 const QUESTIONS: Record<Step, string> = {
