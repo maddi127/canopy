@@ -9,7 +9,8 @@
  *   C. traceBoundary + catmullRomClosed — smooth cell boundaries into polygons
  */
 
-import type { PhotoGridResult } from './photoGridService';
+// photoGridService was removed; structural stand-in so this legacy module still type-checks.
+type PhotoGridResult = any;
 
 const genId = () =>
   typeof crypto !== 'undefined' && crypto.randomUUID

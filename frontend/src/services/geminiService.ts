@@ -3678,7 +3678,9 @@ export async function detectSiteFeatures(
         confidence: typeof f.confidence === 'number' ? Math.min(1, Math.max(0, f.confidence)) : 0.7,
       }));
 
-    // Keep only features whose centroid falls within the 10ft search zone
+    // Keep any feature whose footprint INTERSECTS the 10ft search zone — matches clipFeaturesToBoundary's
+    // intent so a house/driveway that overlaps the boundary but is centred outside it (e.g. the yard is
+    // just the front lawn) is still surfaced. A centroid-inside test dropped those before the clip saw them.
     try {
       const boundaryPoly = turf.polygon([[...boundaryVerts, boundaryVerts[0]]]);
       const buffered = turf.buffer(boundaryPoly, SEARCH_BUFFER_M, { units: 'meters' });
@@ -3686,8 +3688,7 @@ export async function detectSiteFeatures(
         const filtered = mapped.filter(f => {
           if (f.vertices.length < 3) return false;
           try {
-            const centroid = turf.centroid(turf.polygon([[...f.vertices, f.vertices[0]]]));
-            return turf.booleanPointInPolygon(centroid, buffered as any);
+            return turf.booleanIntersects(turf.polygon([[...f.vertices, f.vertices[0]]]), buffered as any);
           } catch { return false; }
         });
         console.log(`[detectSiteFeatures] ${mapped.length} detected, ${filtered.length} within boundary`);

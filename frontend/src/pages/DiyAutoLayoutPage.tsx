@@ -2,31 +2,14 @@ import { useMemo, useRef } from 'react';
 import DiyPlacementPage from './DiyPlacementPage';
 import { generateLayout } from '../services/layoutGenerator';
 import { sunMapForSite, type SunMap } from '../services/sunAnalysis';
+import { inputSignature } from '../lib/planSignature';
 
 // Auto-layout: run a sun analysis of the site, generate a starting plan (features defaulted to a
 // size/shape/location, biased by sun — veggie beds sunny, seating shadier), then reuse the
 // /placement editor unchanged so everything stays fully editable. The plan is regenerated whenever
 // the design INPUTS change (boundary, existing features, preferences, entry point) but preserved on
-// a plain revisit, so manual edits aren't blown away.
-
-function inputSignature(): string {
-  try {
-    const saved = JSON.parse(localStorage.getItem('diyBoundaryFinal') || '{}');
-    const prefs = JSON.parse(localStorage.getItem('userPreferences') || '{}');
-    const site = JSON.parse(localStorage.getItem('siteContext') || '{}');
-    const door = localStorage.getItem('diyDoorPoint') || 'null';
-    return JSON.stringify({
-      v: 'g4', // bump when the generator's rules change so the plan regenerates once
-      boundary: saved.boundary ?? [],
-      existing: (saved.confirmedFeatures ?? []).map((f: any) => [f.type, f.keep, f.vertices?.length]),
-      features: prefs.space_usage ?? [],
-      lawn: prefs.lawnTarget ?? 0,
-      style: prefs.style ?? '',
-      yard: site.yard_type ?? prefs.yard_type ?? '',
-      door,
-    });
-  } catch { return ''; }
-}
+// a plain revisit, so manual edits aren't blown away. The signature lives in lib/planSignature so
+// the draft flow can write a matching one (studio then preserves instead of regenerating).
 
 export default function DiyAutoLayoutPage() {
   const seedRef = useRef(1);

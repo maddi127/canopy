@@ -1,6 +1,9 @@
 import * as turf from '@turf/turf';
 import type { ConfirmedFeature } from '../pages/DiyFeatureConfirmPage';
 import { sampleSun, type SunMap } from './sunAnalysis';
+import { planCirculation } from './circulationPlanner';
+import { getSiteFacts } from './siteFacts';
+import { composePlan, type FocalSlot } from './compositionPlanner';
 
 // Rule-based automatic layout generator. Produces the SAME plan schema the manual /placement
 // editor consumes ({zones, beds, paths, primary}); the editor re-derives ring/boundary/areas
@@ -8,8 +11,8 @@ import { sampleSun, type SunMap } from './sunAnalysis';
 
 type Ring = [number, number][];
 interface PlanZone { id: string; key: string; label: string; color: string; material?: string; shape: 'rect' | 'circle' | 'organic'; xFt: number; yFt: number; wFt: number; hFt: number; verts?: [number, number][]; }
-interface PlanPath { id: string; label: string; startId: string; endId: string; pts: [number, number][]; style: 'straight' | 'winding'; material: string; widthFt: number; }
-export interface GeneratedPlan { zones: PlanZone[]; beds: any[]; paths: PlanPath[]; primary: { material: string | null; variant: string | null }; }
+export interface PlanPath { id: string; label: string; startId: string; endId: string; pts: [number, number][]; style: 'straight' | 'winding'; material: string; widthFt: number; kind?: 'walkway' | 'creek'; color?: string; reason?: string; }
+export interface GeneratedPlan { zones: PlanZone[]; beds: any[]; paths: PlanPath[]; primary: { material: string | null; variant: string | null }; focalSlots: FocalSlot[]; }
 
 // Feature catalogue (matches the placement toolbar). zone = placement preference.
 const FEAT: Record<string, { label: string; color: string; w: number; h: number; shape: 'rect' | 'circle'; material?: string; zone: 'house' | 'focal' | 'open' | 'corner' }> = {
@@ -228,9 +231,10 @@ export function generateLayout(opts: { boundary: Ring; existing: ConfirmedFeatur
     const score = (cx: number, cy: number): number => {
       const dHouse = distToPolys(cx, cy, houseRings);
       const dBoundary = distToPolys(cx, cy, [boundaryFt]);
-      // Sun bias: a veggie garden wants full sun; seating is nicer with some shade.
+      // Sun bias: a veggie garden wants full sun; seating is nicer with some shade — but NOT in a
+      // front yard, where seating should hug the house (a shady far corner shouldn't pull it out).
       let sun = 0;
-      if (opts.sun) { const s = sampleSun(opts.sun, cx, cy); if (key === 'garden') sun = s * 60; else if (key === 'seating') sun = (1 - s) * 45; }
+      if (opts.sun) { const s = sampleSun(opts.sun, cx, cy); if (key === 'garden') sun = s * 60; else if (key === 'seating' && !frontYard) sun = (1 - s) * 45; }
       // The veggie garden reads best as its own area — reward sitting apart from other features,
       // except seating (a garden beside a seating area is fine / even nice).
       let sep = 0;
@@ -299,6 +303,52 @@ export function generateLayout(opts: { boundary: Ring; existing: ConfirmedFeatur
     if (spot) zones.push({ id: lawnId, key: 'lawn', label: 'Lawn', color: '#8DAA6A', shape: lawnShape, xFt: spot.cx - spot.w / 2, yFt: spot.cy - spot.h / 2, wFt: Math.round(spot.w), hFt: Math.round(spot.h) });
   }
 
-  const primary = { material: null, variant: null }; // no default — the user picks the primary material
-  return { zones, beds: [], paths, primary };
+  // ── Circulation (walkways) ────────────────────────────────────────────────────────
+  // Route ALL walkways deterministically from the site's desire-line graph. Facts come from the
+  // site-facts model (aerial + Street View + user). This SUBSUMES the old hardcoded side-gate rule:
+  // the planner's sidewalk↔side_gate edge replaces it, using the same anchor semantics. When facts
+  // are absent we skip circulation entirely (parity with pre-facts behaviour, minus that old rule).
+  // Wrapped so it can never break plan generation.
+  try {
+    const facts = getSiteFacts();
+    if (facts) {
+      let houseRing: Ring | null = null;
+      if (houseRings.length) { houseRing = houseRings[0]; let bA = ringArea(houseRing); for (const r of houseRings) { const a = ringArea(r); if (a > bA) { bA = a; houseRing = r; } } }
+      const circ = planCirculation({ boundaryFt, houseRing, zones, existingPaths: paths, facts, style: dbStyle, yardType: frontYard ? 'front' : 'back' });
+      for (const p of circ) { if (!paths.some(ep => ep.label === p.label)) paths.push(p); }
+    }
+  } catch { /* facts/circulation unavailable — never break plan generation */ }
+
+  // Primary ground cover defaults by style (editable in the details panel): desert reads as rock,
+  // everything else as natural mulch. Computed BEFORE composition so the composer can pick a
+  // contrasting bed material against the plan's ground cover.
+  const primary: { material: string | null; variant: string | null } =
+    dbStyle === 'desert' ? { material: 'rock', variant: 'pea' } : { material: 'mulch', variant: 'natural' };
+
+  // ── Composition (aesthetic massing) ─────────────────────────────────────────────────
+  // AFTER features + lawn + circulation, BEFORE plant placement: fill the deadest voids with accent
+  // beds, an optional dry creek, and focal-plant slots. Merged idempotently (comp beds by id prefix
+  // `comp_bed_`, the creek by id `comp_creek_0`). Wrapped so it can never break plan generation.
+  const beds: any[] = [];
+  let focalSlots: FocalSlot[] = [];
+  try {
+    const facts = getSiteFacts();
+    let houseRing: Ring | null = null;
+    if (houseRings.length) { houseRing = houseRings[0]; let bA = ringArea(houseRing); for (const r of houseRings) { const a = ringArea(r); if (a > bA) { bA = a; houseRing = r; } } }
+    const comp = composePlan({
+      boundaryFt, houseRing, zones, paths,
+      existingBeds: beds,                                  // plan.beds before merge (always [] at this point)
+      facts, sun: opts.sun ?? null, style: dbStyle, yardType: frontYard ? 'front' : 'back',
+      plantDensity: typeof prefs?.plantDensity === 'number' ? prefs.plantDensity : undefined,
+      primary,
+    });
+    // Accent beds are NOT auto-placed (user 2026-07: "they still feel strange — don't place any").
+    // Users add planting beds themselves in the editor. The composer's creek + focal-plant slots
+    // are still used. To re-enable auto accent beds, restore the merge below.
+    // for (const b of comp.beds) if (b && !beds.some(eb => eb.id === b.id)) beds.push(b);       // idempotent: comp_bed_*
+    if (comp.creek && !paths.some(p => p.id === comp.creek!.id)) paths.push(comp.creek);      // idempotent: comp_creek_0
+    focalSlots = comp.focalSlots ?? [];
+  } catch { /* composition unavailable — never break plan generation */ }
+
+  return { zones, beds, paths, primary, focalSlots };
 }

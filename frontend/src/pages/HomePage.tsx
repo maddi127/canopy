@@ -2,259 +2,230 @@ import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
 import AddressInput from '../features/onboarding/AddressInput';
-import { useAuth } from '../context/AuthContext';
 import { clearLocalState } from '../services/projectsService';
 
-const BG  = '#e9e4d9';
-const DARK = '#1a1a16';
-const RUST = '#c96b3a';
+const BG      = '#e8e3d5';
+const DARK    = '#1a1a16';
+const RUST    = '#c96b3a';
+const OLIVE   = '#6b7a48';   // italic accent in the headline
+const GREEN   = '#4c6440';   // primary buttons + CTA band
+const PANEL   = '#efe9dd';   // step-illustration card backdrop
+const MUTED   = '#7c7768';
 const IS = "'Instrument Serif', serif";
 const IT = "'Inter Tight', sans-serif";
+const INK = '#40392e';   // hand-drawn outline ink, matching the plan painter
+
+// ── Watercolour plant blobs (echo the illustrated plan style) ────────────────────
+// Seeded so the shapes are stable across renders. A "foliage" blob is a lobed scallop —
+// the same silhouette the plan painter draws for a plant clump.
+function mulberry32(seed: number) {
+  let a = seed >>> 0;
+  return () => { a = (a + 0x6d2b79f5) >>> 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+function foliagePath(cx: number, cy: number, r: number, lobes: number, seed: number): string {
+  const rng = mulberry32(seed);
+  const pts = Array.from({ length: lobes }, (_, i) => {
+    const a = (i / lobes) * Math.PI * 2 - Math.PI / 2;
+    const rr = r * (0.78 + rng() * 0.32);
+    return { x: cx + Math.cos(a) * rr, y: cy + Math.sin(a) * rr, a };
+  });
+  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
+  for (let i = 0; i < lobes; i++) {
+    const p = pts[i], q = pts[(i + 1) % lobes];
+    const mid = p.a + Math.PI / lobes;
+    const bulge = r * 1.16;
+    d += ` Q ${(cx + Math.cos(mid) * bulge).toFixed(1)} ${(cy + Math.sin(mid) * bulge).toFixed(1)} ${q.x.toFixed(1)} ${q.y.toFixed(1)}`;
+  }
+  return d + ' Z';
+}
+function PlantBlob({ cx, cy, r, color, dark, seed, lobes = 9, flower }: { cx: number; cy: number; r: number; color: string; dark: string; seed: number; lobes?: number; flower?: string }) {
+  const outer = foliagePath(cx, cy, r, lobes, seed);
+  const rng = mulberry32(seed + 99);
+  return (
+    <g filter="url(#wc)">
+      <path d={outer} fill={color} />
+      <path d={foliagePath(cx, cy, r * 0.6, lobes, seed + 5)} fill={dark} opacity={0.4} />
+      <path d={outer} fill="none" stroke={INK} strokeWidth={1.3} strokeOpacity={0.5} strokeLinejoin="round" />
+      {flower && Array.from({ length: 5 }).map((_, i) => {
+        const a = rng() * Math.PI * 2, rr = r * 0.45 * rng();
+        return <circle key={i} cx={cx + Math.cos(a) * rr} cy={cy + Math.sin(a) * rr} r={r * 0.16} fill={flower} />;
+      })}
+    </g>
+  );
+}
 
 const STEPS = [
   {
-    num: '01',
-    label: 'STEP 1',
-    title: 'Share your goals',
-    desc: 'We walk through what matters most to you and how you want to use the space.',
-    checks: ['Address + lot details', 'Existing features', 'Sun & soil analysis'],
-  },	  
-  {
-    num: '02',
-    label: 'STEP 2',
-    title: 'Build your site plan',
-    desc: 'Where you are, how the sun moves, what stays.',
-    checks: ['Address + lot details', 'Existing features', 'Sun & soil analysis'],
+    label: 'STEP 01',
+    title: 'Submit your preferences',
+    desc: 'Style, features, budget, and how you actually live outside. We tune everything downstream to what you tell us here.',
+    checks: ['Design style & mood', 'Must-have features'],
   },
   {
-    num: '03',
-    label: 'STEP 3',
-    title: 'Choose from a curated plant list',
-    desc: "We'll suggest plants that fit your style, climate, and sun. Swap anything you don't love before we lock it in.",
-    checks: ['Climate-matched selections', 'Style-filtered options', 'Swap freely before approving'],
-  }
+    label: 'STEP 02',
+    title: 'Build a site plan',
+    desc: 'Draw your project area right on the map, then confirm the trees, structures, and hardscape that are staying put.',
+    checks: ['Draw your project area', 'Confirm existing features', 'Sun & soil analysis'],
+  },
+  {
+    label: 'STEP 03',
+    title: 'Finetune your draft design',
+    desc: 'Nudge feature placement, choose your groundcover treatment, and swap any plant in the palette before you lock it in.',
+    checks: ['Confirm feature placement', 'Groundcover treatment', 'Plant selection & swaps'],
+  },
 ];
 
-// ── Plan illustration ─────────────────────────────────────────────────────────
+// ── Hero aerial-plan illustration ───────────────────────────────────────────────
+
+const HERO_PLANTS = [
+  { cx: 106, cy: 118, r: 52, color: '#4a6e40', dark: '#32502e', lobes: 12, seed: 11 },
+  { cx: 158, cy: 66,  r: 26, color: '#6f9153', dark: '#516f3c', lobes: 9,  seed: 21 },
+  { cx: 176, cy: 232, r: 34, color: '#87a35f', dark: '#5f7c42', lobes: 10, seed: 31 },
+  { cx: 252, cy: 168, r: 24, color: '#9b7bb0', dark: '#7a5c93', lobes: 9,  seed: 41, flower: '#cf9bd8' },
+  { cx: 330, cy: 84,  r: 27, color: '#d7b256', dark: '#c0983c', lobes: 10, seed: 51 },
+  { cx: 302, cy: 250, r: 26, color: '#57784a', dark: '#3f5c37', lobes: 9,  seed: 61 },
+  { cx: 234, cy: 288, r: 21, color: '#c96b3a', dark: '#a9542b', lobes: 8,  seed: 71, flower: '#e6a06a' },
+  { cx: 352, cy: 178, r: 18, color: '#6f9153', dark: '#516f3c', lobes: 8,  seed: 81 },
+];
 
 function PlanIllustration() {
   return (
-    <div style={{ position: 'relative', width: '100%', maxWidth: '480px', marginLeft: 'auto' }}>
-      <svg viewBox="0 0 460 430" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ width: '100%', height: 'auto', overflow: 'visible' }}>
-        {/* Drop shadow filter */}
+    <div style={{ position: 'relative', width: '100%', maxWidth: '440px', marginLeft: 'auto' }}>
+      <svg viewBox="0 0 440 400" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ width: '100%', height: 'auto', overflow: 'visible' }}>
         <defs>
-          <filter id="card-shadow" x="-10%" y="-10%" width="130%" height="130%">
-            <feDropShadow dx="0" dy="8" stdDeviation="16" floodColor="#1a1a16" floodOpacity="0.13" />
+          <filter id="card-shadow" x="-15%" y="-15%" width="140%" height="150%">
+            <feDropShadow dx="0" dy="10" stdDeviation="20" floodColor="#1a1a16" floodOpacity="0.14" />
           </filter>
-          <filter id="back-shadow" x="-10%" y="-10%" width="130%" height="130%">
-            <feDropShadow dx="0" dy="4" stdDeviation="10" floodColor="#1a1a16" floodOpacity="0.09" />
-          </filter>
-          <clipPath id="front-card-clip">
-            <rect x="20" y="20" width="360" height="360" rx="20" />
-          </clipPath>
+          <clipPath id="front-card-clip"><rect x="30" y="10" width="360" height="330" rx="24" /></clipPath>
         </defs>
 
-        {/* Back card — rotated, peeking at bottom-right */}
-        <g transform="rotate(5, 230, 380)" filter="url(#back-shadow)">
-          <rect x="100" y="290" width="300" height="160" rx="16" fill="#f5f0e6" />
-          <text x="123" y="342" fontFamily={IT} fontSize="11" fill="#9a9485" letterSpacing="0.04em">your plan</text>
-          <text x="360" y="342" fontFamily={IT} fontSize="11" fill="#c0bdb0" textAnchor="end">2026</text>
-          {/* Mini plan lines */}
-          <rect x="123" y="355" width="60" height="6" rx="3" fill="#e0dbd0" />
-          <rect x="123" y="368" width="42" height="6" rx="3" fill="#e0dbd0" />
-          <rect x="123" y="381" width="52" height="6" rx="3" fill="#e0dbd0" />
-          <rect x="240" y="355" width="32" height="32" rx="4" fill="#c8d2bc" />
-          <circle cx="300" cy="368" r="14" fill="#3d5c3a" opacity="0.45" />
-          <circle cx="328" cy="362" r="9" fill="#5a7a50" opacity="0.4" />
-        </g>
+        {/* Stacked paper cards behind for depth */}
+        <rect x="52" y="26" width="360" height="330" rx="24" fill="#e6dfce" opacity="0.6" />
+        <rect x="42" y="18" width="360" height="330" rx="24" fill="#efe8d8" opacity="0.85" />
 
-        {/* Front card */}
+        {/* Front card — paper plan */}
         <g filter="url(#card-shadow)">
-          <rect x="20" y="20" width="360" height="360" rx="20" fill="#c4cfb8" />
-
-          {/* Clipped content */}
+          <rect x="30" y="10" width="360" height="330" rx="24" fill="#f6f1e6" />
           <g clipPath="url(#front-card-clip)">
-            {/* Rain texture dots */}
-            {Array.from({ length: 48 }).map((_, i) => {
-              const col = i % 8;
-              const row = Math.floor(i / 8);
-              return (
-                <rect
-                  key={i}
-                  x={38 + col * 44}
-                  y={38 + row * 52}
-                  width="1.5"
-                  height="7"
-                  rx="1"
-                  fill="#a8b89e"
-                  opacity="0.45"
-                />
-              );
-            })}
-
-            {/* Large tree blob (main) */}
-            <ellipse cx="145" cy="175" rx="68" ry="88" fill="#2d4e2a" />
-            <ellipse cx="118" cy="135" rx="42" ry="48" fill="#263e24" />
-            <ellipse cx="165" cy="215" rx="32" ry="36" fill="#3a5e36" />
-
-            {/* Secondary tree cluster top-right */}
-            <circle cx="280" cy="82" r="38" fill="#deba5c" opacity="0.82" />
-            <circle cx="308" cy="96" r="18" fill="#c9a63e" opacity="0.7" />
-
-            {/* Small shrub bottom-right */}
-            <circle cx="300" cy="290" r="22" fill="#4a6e40" opacity="0.75" />
-            <circle cx="322" cy="305" r="14" fill="#3d5c3a" opacity="0.65" />
-            <circle cx="286" cy="312" r="10" fill="#5a7a50" opacity="0.7" />
-
-            {/* Walkway / path */}
-            <path
-              d="M155 378 Q175 320 225 265 Q270 215 315 155 Q340 115 350 68"
-              stroke="#9a9180"
-              strokeWidth="20"
-              fill="none"
-              strokeLinecap="round"
-            />
-            <path
-              d="M155 378 Q175 320 225 265 Q270 215 315 155 Q340 115 350 68"
-              stroke="#b0a896"
-              strokeWidth="14"
-              fill="none"
-              strokeLinecap="round"
-            />
-
-            {/* Plant dots along path */}
-            {[
-              { cx: 162, cy: 360, fill: '#d45c3a' },
-              { cx: 178, cy: 340, fill: '#4a7a50' },
-              { cx: 195, cy: 315, fill: '#d45c3a' },
-              { cx: 213, cy: 290, fill: '#6a9460' },
-              { cx: 235, cy: 263, fill: '#d45c3a' },
-              { cx: 255, cy: 238, fill: '#4a7a50' },
-              { cx: 275, cy: 210, fill: '#d45c3a' },
-              { cx: 298, cy: 178, fill: '#6a9460' },
-              { cx: 315, cy: 152, fill: '#4a6aaa' },
-              { cx: 328, cy: 127, fill: '#d45c3a' },
-              { cx: 340, cy: 100, fill: '#4a7a50' },
-            ].map((dot, i) => (
-              <circle key={i} cx={dot.cx} cy={dot.cy} r="5.5" fill={dot.fill} />
-            ))}
+            {/* Faint graph-paper grid */}
+            {Array.from({ length: 9 }).map((_, i) => <line key={`h${i}`} x1="30" y1={10 + i * 40} x2="390" y2={10 + i * 40} stroke={INK} strokeOpacity="0.05" strokeWidth="1" />)}
+            {Array.from({ length: 9 }).map((_, i) => <line key={`v${i}`} x1={30 + i * 45} y1="10" x2={30 + i * 45} y2="340" stroke={INK} strokeOpacity="0.05" strokeWidth="1" />)}
+            {/* Lawn wash */}
+            <g filter="url(#wc)"><path d={foliagePath(232, 232, 92, 16, 3)} fill="#b9c996" opacity="0.85" /></g>
+            {/* Gravel path (sketchy) */}
+            <g filter="url(#wc)">
+              <path d="M120 350 Q210 252 300 152 Q344 102 380 44" stroke="#c2b9a1" strokeWidth="26" fill="none" strokeLinecap="round" />
+              <path d="M120 350 Q210 252 300 152 Q344 102 380 44" stroke="#d5ccb4" strokeWidth="16" fill="none" strokeLinecap="round" />
+            </g>
+            {/* Plant clumps */}
+            {HERO_PLANTS.map((p, i) => <PlantBlob key={i} {...p} />)}
           </g>
-        </g>
-
-        {/* Zone badge overlay */}
-        <g>
-          <rect x="36" y="36" width="170" height="22" rx="11" fill="white" opacity="0.92" />
-          <circle cx="50" cy="48" r="4" fill="#3d5c3a" />
-          <text x="60" y="52.5" fontFamily={IT} fontSize="10" fill="#1a1a16" fontWeight="500" letterSpacing="0.05em">
-            ZONE 7B · SALT LAKE CITY
-          </text>
+          {/* Zone badge */}
+          <g>
+            <rect x="46" y="26" width="186" height="26" rx="13" fill="white" opacity="0.94" />
+            <circle cx="62" cy="39" r="4" fill="#3d5c3a" />
+            <text x="74" y="43.5" fontFamily={IT} fontSize="11" fill={DARK} fontWeight="500" letterSpacing="0.05em">ZONE 7B · SALT LAKE CITY</text>
+          </g>
         </g>
       </svg>
     </div>
   );
 }
 
-// ── Step illustration placeholders ────────────────────────────────────────────
+// ── Step illustrations ──────────────────────────────────────────────────────────
 
-function HouseIllustration() {
+function PreferencesIllustration() {
+  const cells = [
+    { x: 34,  y: 40,  fill: '#5a7a50' },
+    { x: 132, y: 40,  fill: '#deba5c' },
+    { x: 230, y: 40,  fill: '#c96b3a' },
+    { x: 34,  y: 138, fill: '#5a7a50' },
+    { x: 132, y: 138, fill: '#4a6aaa' },
+    { x: 230, y: 138, fill: '#6a8a4a', sel: true },
+  ];
   return (
-    <svg viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ width: '100%', height: 'auto' }}>
-      <defs>
-        <filter id="house-shadow">
-          <feDropShadow dx="0" dy="4" stdDeviation="10" floodColor="#1a1a16" floodOpacity="0.08" />
-        </filter>
-      </defs>
-      <rect x="20" y="20" width="280" height="200" rx="16" fill="#f0ece3" filter="url(#house-shadow)" />
-      {/* Sun rays */}
-      {[0, 45, 90, 135, 180, 225, 270, 315].map((angle, i) => (
-        <line key={i} x1="240" y1="60" x2={240 + 22 * Math.cos((angle * Math.PI) / 180)} y2={60 + 22 * Math.sin((angle * Math.PI) / 180)} stroke="#c9a63e" strokeWidth="2" strokeLinecap="round" />
+    <svg viewBox="0 0 340 250" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ width: '100%', height: 'auto' }}>
+      <defs><filter id="pref-shadow" x="-8%" y="-8%" width="116%" height="120%"><feDropShadow dx="0" dy="5" stdDeviation="13" floodColor="#1a1a16" floodOpacity="0.08" /></filter></defs>
+      <rect x="10" y="10" width="320" height="230" rx="20" fill={PANEL} filter="url(#pref-shadow)" />
+      {cells.map((c, i) => (
+        <g key={i}>
+          <rect x={c.x} y={c.y} width="76" height="72" rx="12" fill={c.sel ? '#e0ebd4' : '#ffffff'} stroke={c.sel ? '#8aa86a' : 'none'} strokeWidth={c.sel ? 1.5 : 0} />
+          <circle cx={c.x + 20} cy={c.y + 22} r="11" fill={c.fill} opacity="0.9" />
+          <rect x={c.x + 12} y={c.y + 44} width="42" height="5" rx="2.5" fill="#d8d3c6" />
+          <rect x={c.x + 12} y={c.y + 54} width="26" height="5" rx="2.5" fill="#e4dfd3" />
+          {c.sel && (
+            <g>
+              <circle cx={c.x + 60} cy={c.y + 14} r="9" fill="#3d6b4a" />
+              <path d={`M ${c.x + 56} ${c.y + 14} l 3 3 l 6 -6.5`} stroke="white" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </g>
+          )}
+        </g>
       ))}
-      <circle cx="240" cy="60" r="12" fill="#deba5c" />
-      {/* House outline */}
-      <path d="M100 175 L100 120 L160 82 L220 120 L220 175 Z" stroke="#1a1a16" strokeWidth="2" fill="none" strokeLinejoin="round" />
-      {/* Roof */}
-      <path d="M90 126 L160 78 L230 126" stroke="#1a1a16" strokeWidth="2" fill="none" strokeLinejoin="round" />
-      {/* Door */}
-      <rect x="145" y="148" width="28" height="27" rx="2" stroke="#1a1a16" strokeWidth="1.5" fill="none" />
-      {/* Windows */}
-      <rect x="107" y="128" width="22" height="18" rx="2" stroke="#1a1a16" strokeWidth="1.5" fill="none" />
-      <rect x="191" y="128" width="22" height="18" rx="2" stroke="#1a1a16" strokeWidth="1.5" fill="none" />
-      {/* Trees */}
-      <circle cx="72" cy="165" r="18" stroke="#1a1a16" strokeWidth="1.5" fill="none" />
-      <line x1="72" y1="183" x2="72" y2="195" stroke="#1a1a16" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function SitePlanIllustration() {
+  return (
+    <svg viewBox="0 0 340 250" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ width: '100%', height: 'auto' }}>
+      <defs><filter id="site-shadow" x="-8%" y="-8%" width="116%" height="120%"><feDropShadow dx="0" dy="5" stdDeviation="13" floodColor="#1a1a16" floodOpacity="0.08" /></filter></defs>
+      <rect x="10" y="10" width="320" height="230" rx="20" fill={PANEL} filter="url(#site-shadow)" />
+      {/* Sun */}
+      {[0, 45, 90, 135, 180, 225, 270, 315].map((a, i) => (
+        <line key={i} x1="256" y1="66" x2={256 + 22 * Math.cos((a * Math.PI) / 180)} y2={66 + 22 * Math.sin((a * Math.PI) / 180)} stroke="#c9a63e" strokeWidth="2" strokeLinecap="round" />
+      ))}
+      <circle cx="256" cy="66" r="13" fill="#deba5c" />
+      {/* House */}
+      <path d="M96 178 L96 120 L160 80 L224 120 L224 178 Z" stroke={DARK} strokeWidth="2" fill="none" strokeLinejoin="round" />
+      <path d="M86 126 L160 76 L234 126" stroke={DARK} strokeWidth="2" fill="none" strokeLinejoin="round" />
+      <rect x="145" y="150" width="30" height="28" rx="2" stroke={DARK} strokeWidth="1.5" fill="none" />
+      <rect x="106" y="130" width="24" height="18" rx="2" stroke={DARK} strokeWidth="1.5" fill="none" />
+      <rect x="190" y="130" width="24" height="18" rx="2" stroke={DARK} strokeWidth="1.5" fill="none" />
+      {/* Tree */}
+      <circle cx="66" cy="166" r="19" stroke={DARK} strokeWidth="1.5" fill="none" />
+      <line x1="66" y1="185" x2="66" y2="198" stroke={DARK} strokeWidth="1.5" />
       {/* Ground line */}
-      <line x1="42" y1="195" x2="278" y2="195" stroke="#1a1a16" strokeWidth="1.5" strokeLinecap="round" strokeDasharray="4 4" />
+      <line x1="40" y1="198" x2="300" y2="198" stroke={DARK} strokeWidth="1.5" strokeLinecap="round" strokeDasharray="4 5" />
     </svg>
   );
 }
 
-function PaletteIllustration() {
+function FinetuneIllustration() {
   return (
-    <svg viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ width: '100%', height: 'auto' }}>
-      <defs>
-        <filter id="palette-shadow">
-          <feDropShadow dx="0" dy="4" stdDeviation="10" floodColor="#1a1a16" floodOpacity="0.08" />
-        </filter>
-      </defs>
-      <rect x="20" y="20" width="280" height="200" rx="16" fill="#f0ece3" filter="url(#palette-shadow)" />
-      {/* Plant cards grid */}
-      {[
-        { x: 40, y: 48, fill: '#3d5c3a' },
-        { x: 120, y: 48, fill: '#deba5c' },
-        { x: 200, y: 48, fill: '#c96b3a' },
-        { x: 40, y: 130, fill: '#5a7a50' },
-        { x: 120, y: 130, fill: '#4a6aaa' },
-        { x: 200, y: 130, fill: '#8a6a3a' },
-      ].map((card, i) => (
+    <svg viewBox="0 0 340 250" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ width: '100%', height: 'auto' }}>
+      <defs><filter id="fine-shadow" x="-8%" y="-8%" width="116%" height="120%"><feDropShadow dx="0" dy="5" stdDeviation="13" floodColor="#1a1a16" floodOpacity="0.08" /></filter></defs>
+      <rect x="10" y="10" width="320" height="230" rx="20" fill={PANEL} filter="url(#fine-shadow)" />
+      {/* Left: watercolour plan preview (paper + lawn + clumps, matching the real plan) */}
+      <clipPath id="fine-plan-clip"><rect x="30" y="42" width="176" height="166" rx="12" /></clipPath>
+      <rect x="30" y="42" width="176" height="166" rx="12" fill="#f6f1e6" />
+      <g clipPath="url(#fine-plan-clip)">
+        <g filter="url(#wc)"><path d={foliagePath(118, 128, 52, 15, 7)} fill="#b9c996" opacity="0.85" /></g>
+        <g filter="url(#wc)"><path d="M40 200 Q90 160 150 120 Q175 104 200 92" stroke="#c8bfa7" strokeWidth="12" fill="none" strokeLinecap="round" /></g>
+        <PlantBlob cx={72} cy={92} r={26} color="#4a6e40" dark="#33512f" lobes={11} seed={107} />
+        <PlantBlob cx={132} cy={158} r={20} color="#87a35f" dark="#5f7c42" lobes={9} seed={117} />
+        <PlantBlob cx={168} cy={104} r={16} color="#9b7bb0" dark="#7a5c93" lobes={9} seed={127} flower="#cf9bd8" />
+      </g>
+      {/* Right: palette list + swap */}
+      <rect x="222" y="42" width="88" height="166" rx="12" fill="#ffffff" />
+      {[0, 1, 2].map(i => (
         <g key={i}>
-          <rect x={card.x} y={card.y} width="72" height="72" rx="10" fill="white" opacity="0.7" />
-          <circle cx={card.x + 36} cy={card.y + 28} r="18" fill={card.fill} opacity="0.75" />
-          <rect x={card.x + 12} y={card.y + 52} width="28" height="5" rx="2.5" fill="#c8c2b4" />
-          <rect x={card.x + 12} y={card.y + 62} width="18" height="4" rx="2" fill="#dad5c8" />
+          <circle cx="238" cy={64 + i * 26} r="6" fill={['#3d5c3a', '#deba5c', '#c96b3a'][i]} opacity="0.85" />
+          <rect x="250" y={59 + i * 26} width="44" height="4.5" rx="2" fill="#d8d3c6" />
+          <rect x="250" y={67 + i * 26} width="30" height="4.5" rx="2" fill="#e4dfd3" />
         </g>
       ))}
-      {/* Checkmark badge */}
-      <circle cx="252" cy="188" r="14" fill="#2d4e2a" />
-      <path d="M245 188 L250 193 L259 182" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      <rect x="234" y="170" width="64" height="26" rx="13" fill="#f4efe6" stroke="#dcd6c8" strokeWidth="1" />
+      <text x="266" y="187" fontFamily={IT} fontSize="9.5" fill="#3d5c3a" fontWeight="600" textAnchor="middle">Swap plant</text>
     </svg>
   );
 }
 
-function PlanDocIllustration() {
-  return (
-    <svg viewBox="0 0 320 240" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ width: '100%', height: 'auto' }}>
-      <defs>
-        <filter id="doc-shadow">
-          <feDropShadow dx="0" dy="4" stdDeviation="10" floodColor="#1a1a16" floodOpacity="0.08" />
-        </filter>
-      </defs>
-      <rect x="20" y="20" width="280" height="200" rx="16" fill="#f0ece3" filter="url(#doc-shadow)" />
-      {/* Plan background */}
-      <rect x="44" y="44" width="172" height="152" rx="8" fill="#c4cfb8" opacity="0.6" />
-      {/* Organic zones on plan */}
-      <ellipse cx="100" cy="110" rx="38" ry="46" fill="#3d5c3a" opacity="0.6" />
-      <ellipse cx="148" cy="148" rx="28" ry="22" fill="#deba5c" opacity="0.55" />
-      <path d="M80 185 Q120 165 170 160 Q195 158 215 150" stroke="#9a9180" strokeWidth="10" fill="none" strokeLinecap="round" opacity="0.7" />
-      {/* Plant legend */}
-      <rect x="230" y="44" width="55" height="152" rx="8" fill="white" opacity="0.55" />
-      {[0, 1, 2, 3, 4].map(i => (
-        <g key={i}>
-          <circle cx="246" cy={64 + i * 28} r="6" fill={['#3d5c3a', '#deba5c', '#c96b3a', '#5a7a50', '#4a6aaa'][i]} opacity="0.8" />
-          <rect x="257" y={59 + i * 28} width="20" height="4" rx="2" fill="#c8c2b4" />
-          <rect x="257" y={66 + i * 28} width="14" height="3" rx="1.5" fill="#dad5c8" />
-        </g>
-      ))}
-    </svg>
-  );
-}
-
-const STEP_ILLUSTRATIONS = [HouseIllustration, PaletteIllustration, PlanDocIllustration];
+const STEP_ILLUSTRATIONS = [PreferencesIllustration, SitePlanIllustration, FinetuneIllustration];
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function HomePage() {
   const navigate = useNavigate();
-  const { user } = useAuth();
 
   const handleAddressSelect = useCallback((address: string, lat: number, lng: number) => {
     clearLocalState();
@@ -263,83 +234,69 @@ export default function HomePage() {
     navigate('/diy/preferences');
   }, [navigate]);
 
-  // Starting a plan without an address on the homepage sends them to the
-  // address step first; otherwise continue straight into preferences.
+  // The three "Design my yard" buttons start the flow at preferences even without an address —
+  // the address is captured later, above the map on the boundary page. Entering an address in the
+  // hero input still auto-advances via handleAddressSelect (which also stores siteContext).
   const startPlan = useCallback(() => {
-    navigate(localStorage.getItem('initialAddress') ? '/diy/preferences' : '/start');
+    clearLocalState();   // fresh design — the address is captured above the map on the boundary page
+    navigate('/diy/preferences');
   }, [navigate]);
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: BG, fontFamily: IT }}>
 
+      {/* Shared hand-painted edge filter for the watercolour plan illustrations */}
+      <svg width="0" height="0" style={{ position: 'absolute' }} aria-hidden>
+        <defs>
+          <filter id="wc" x="-12%" y="-12%" width="124%" height="124%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.03" numOctaves="2" seed="5" result="n" />
+            <feDisplacementMap in="SourceGraphic" in2="n" scale="4" />
+          </filter>
+        </defs>
+      </svg>
+
       {/* ── Header ── */}
-      <header style={{ padding: '22px 48px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <header style={{ padding: '22px 48px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', maxWidth: '1120px', margin: '0 auto' }}>
         <Logo />
-        <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
-          <button
-            onClick={() => navigate(user ? '/projects' : '/auth')}
-            style={{ fontFamily: IT, fontSize: '0.88rem', color: '#5a5a50', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 500 }}
-          >
-            {user ? 'My designs' : 'Sign in'}
-          </button>
-          <button
-            onClick={startPlan}
-            style={{
-              fontFamily: IT,
-              fontSize: '0.88rem',
-              fontWeight: 500,
-              color: BG,
-              backgroundColor: DARK,
-              border: 'none',
-              borderRadius: '100px',
-              padding: '10px 20px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-            }}
-          >
-            Start my design →
-          </button>
-        </div>
+        <button onClick={startPlan}
+          style={{ fontFamily: IT, fontSize: '0.88rem', fontWeight: 500, color: BG, backgroundColor: DARK, border: 'none', borderRadius: '100px', padding: '10px 20px', cursor: 'pointer' }}>
+          Design my yard →
+        </button>
       </header>
 
       {/* ── Hero ── */}
-      <section style={{ padding: '32px 48px 80px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '48px', alignItems: 'center', maxWidth: '1100px', margin: '0 auto' }}>
-
+      <section style={{ padding: '40px 48px 80px', display: 'grid', gridTemplateColumns: '1.05fr 0.95fr', gap: '48px', alignItems: 'center', maxWidth: '1120px', margin: '0 auto' }}>
         {/* Left */}
         <div>
-          <h1 style={{
-            fontFamily: IS,
-            fontSize: 'clamp(3rem, 5.5vw, 5.2rem)',
-            color: DARK,
-            lineHeight: 1.05,
-            margin: '0 0 36px',
-            fontWeight: 400,
-          }}>
-            Your landscape<br />design co-pilot
+          <h1 style={{ fontFamily: IS, fontSize: 'clamp(2.8rem, 5vw, 4.6rem)', color: DARK, lineHeight: 1.04, margin: '0 0 22px', fontWeight: 400 }}>
+            Your landscape<br />design <span style={{ fontStyle: 'italic', color: OLIVE }}>co-pilot</span>
           </h1>
 
-          {/* Address input pill */}
-          <div className="hero-address-wrapper" style={{
-            display: 'flex',
-            alignItems: 'center',
-            backgroundColor: 'white',
-            borderRadius: '100px',
-            padding: '6px 20px 6px 18px',
-            boxShadow: '0 4px 28px rgba(26,26,22,0.13)',
-            marginBottom: '18px',
-            maxWidth: '460px',
-          }}>
-            {/* Pin icon */}
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0, marginRight: '8px', color: '#9a9485' }}>
+          <p style={{ fontFamily: IT, fontSize: '1.02rem', color: MUTED, lineHeight: 1.6, margin: '0 0 30px', maxWidth: '400px' }}>
+            Tell us your goals, draw your yard, and watch your planting plan take shape.
+          </p>
+
+          {/* Address input pill with inline CTA */}
+          <div className="hero-address-wrapper" style={{ display: 'flex', alignItems: 'center', backgroundColor: 'white', borderRadius: '100px', padding: '6px 6px 6px 18px', boxShadow: '0 4px 28px rgba(26,26,22,0.13)', maxWidth: '460px' }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0, marginRight: '8px' }}>
               <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="#9a9485" />
             </svg>
-
-            {/* Geocoder input */}
             <div style={{ flex: 1, minWidth: 0 }}>
               <AddressInput onAddressSelect={handleAddressSelect} />
             </div>
+            <button onClick={startPlan}
+              style={{ flexShrink: 0, fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, color: '#f2eee2', backgroundColor: GREEN, border: 'none', borderRadius: '100px', padding: '10px 18px', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+              Design my yard
+            </button>
+          </div>
+
+          {/* Feature pills */}
+          <div style={{ display: 'flex', gap: '22px', marginTop: '16px' }}>
+            {['First draft in minutes', 'Unlimited plan edits'].map(t => (
+              <span key={t} style={{ display: 'flex', alignItems: 'center', gap: '7px', fontFamily: IT, fontSize: '0.78rem', color: '#8a8574' }}>
+                <span style={{ color: '#b4af9c' }}>✦</span>{t}
+              </span>
+            ))}
           </div>
         </div>
 
@@ -349,108 +306,92 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── How It Works ── */}
-      <section style={{ padding: '80px 48px 56px', maxWidth: '1100px', margin: '0 auto' }}>
-        <p style={{ fontFamily: IT, fontSize: '1.05rem', color: '#3d5c3a', letterSpacing: '0.16em', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
-          <span style={{ display: 'inline-block', width: '36px', height: '2.5px', backgroundColor: '#3d5c3a' }} />
+      {/* ── How it works heading ── */}
+      <section style={{ padding: '72px 48px 0', maxWidth: '1120px', margin: '0 auto', textAlign: 'center' }}>
+        <p style={{ fontFamily: IT, fontSize: '0.78rem', color: '#3d5c3a', letterSpacing: '0.16em', fontWeight: 700, margin: '0 0 14px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
+          <span style={{ display: 'inline-block', width: '30px', height: '2px', backgroundColor: '#b7bfa6' }} />
           HOW IT WORKS
-          <span style={{ display: 'inline-block', width: '36px', height: '2.5px', backgroundColor: '#3d5c3a' }} />
+          <span style={{ display: 'inline-block', width: '30px', height: '2px', backgroundColor: '#b7bfa6' }} />
         </p>
+        <h2 style={{ fontFamily: IS, fontSize: 'clamp(2rem, 3.4vw, 2.9rem)', color: DARK, fontWeight: 400, margin: 0, lineHeight: 1.1 }}>
+          Three steps to a plan you'll love
+        </h2>
       </section>
 
       {/* ── Steps ── */}
-      <section style={{ padding: '0 48px 100px', maxWidth: '1100px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '80px' }}>
+      <section style={{ padding: '56px 48px 100px', maxWidth: '1120px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '72px' }}>
         {STEPS.map((step, i) => {
           const Illustration = STEP_ILLUSTRATIONS[i];
-          const isEven = i % 2 === 0;
           return (
-            <div key={step.num} style={{
-              display: 'grid',
-              gridTemplateColumns: '1fr 1fr',
-              gap: '64px',
-              alignItems: 'center',
-              direction: isEven ? 'ltr' : 'rtl',
-            }}>
+            <div key={step.label} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '64px', alignItems: 'center' }}>
               {/* Text */}
-              <div style={{ direction: 'ltr' }}>
-                <p style={{ fontFamily: IT, fontSize: '0.7rem', color: RUST, letterSpacing: '0.14em', fontWeight: 600, marginBottom: '14px', margin: '0 0 14px' }}>
+              <div>
+                <p style={{ fontFamily: IT, fontSize: '0.72rem', color: RUST, letterSpacing: '0.14em', fontWeight: 600, margin: '0 0 14px' }}>
                   {step.label}
                 </p>
-                <h3 style={{ fontFamily: IS, fontSize: '1.75rem', color: DARK, lineHeight: 1.2, fontWeight: 400, margin: '0 0 14px' }}>
+                <h3 style={{ fontFamily: IS, fontSize: '1.85rem', color: DARK, lineHeight: 1.2, fontWeight: 400, margin: '0 0 14px' }}>
                   {step.title}
                 </h3>
-                <p style={{ fontFamily: IT, fontSize: '0.87rem', color: '#5a5a50', lineHeight: 1.7, margin: '0 0 16px' }}>
+                <p style={{ fontFamily: IT, fontSize: '0.9rem', color: '#5a5a50', lineHeight: 1.7, margin: '0 0 18px', maxWidth: '360px' }}>
                   {step.desc}
                 </p>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '9px' }}>
                   {step.checks.map(check => (
-                    <span key={check} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontFamily: IT, fontSize: '0.83rem', color: '#5a5a50' }}>
-                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                        <rect x="0.75" y="0.75" width="12.5" height="12.5" rx="3.25" stroke="#9a9485" strokeWidth="1" />
-                        <path d="M3.5 7L5.8 9.2L10.5 4.5" stroke="#3d7a5c" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    <span key={check} style={{ display: 'flex', alignItems: 'center', gap: '9px', fontFamily: IT, fontSize: '0.85rem', color: '#5a5a50' }}>
+                      <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+                        <path d="M3.5 7.8L6.2 10.4L11.4 4.6" stroke="#3d7a5c" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
                       {check}
                     </span>
                   ))}
                 </div>
               </div>
-
-              {/* Illustration */}
-              <div style={{ direction: 'ltr' }}>
-                <Illustration />
-              </div>
+              {/* Illustration (always right) */}
+              <div><Illustration /></div>
             </div>
           );
         })}
       </section>
 
-      {/* ── Global style overrides for geocoder ── */}
+      {/* ── Bottom CTA band ── */}
+      <section style={{ backgroundColor: GREEN, padding: '80px 48px', textAlign: 'center' }}>
+        <h2 style={{ fontFamily: IS, fontSize: 'clamp(1.9rem, 3.2vw, 2.6rem)', color: '#f3efe3', fontWeight: 400, margin: '0 0 12px', lineHeight: 1.1 }}>
+          Ready to see your yard, reimagined?
+        </h2>
+        <p style={{ fontFamily: IT, fontSize: '0.92rem', color: 'rgba(243,239,227,0.72)', margin: '0 0 28px' }}>
+          Start with your address — your first draft is free.
+        </p>
+        <button onClick={startPlan}
+          style={{ fontFamily: IT, fontSize: '0.92rem', fontWeight: 500, color: DARK, backgroundColor: '#ece6d8', border: 'none', borderRadius: '100px', padding: '14px 32px', cursor: 'pointer', boxShadow: '0 6px 20px rgba(0,0,0,0.14)' }}>
+          Design my yard
+        </button>
+      </section>
+
+      {/* ── Geocoder input styling ── */}
       <style>{`
         .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder {
-          box-shadow: none !important;
-          border: none !important;
-          border-radius: 0 !important;
-          background: transparent !important;
-          min-height: unset !important;
-          width: 100% !important;
+          box-shadow: none !important; border: none !important; border-radius: 0 !important;
+          background: transparent !important; min-height: unset !important; width: 100% !important;
         }
         .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder input {
-          font-family: 'Inter Tight', sans-serif !important;
-          font-size: 0.88rem !important;
-          color: #1a1a16 !important;
-          padding: 0 4px !important;
-          height: 42px !important;
-          line-height: 42px !important;
-          background: transparent !important;
-          min-width: 0 !important;
+          font-family: 'Inter Tight', sans-serif !important; font-size: 0.88rem !important;
+          color: #1a1a16 !important; padding: 0 4px !important; height: 42px !important;
+          line-height: 42px !important; background: transparent !important; min-width: 0 !important;
         }
-        .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder input::placeholder {
-          color: #a0a090 !important;
-        }
-        .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder--icon-search {
-          display: none !important;
-        }
-        .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder--button {
-          background: transparent !important;
-          padding: 0 8px !important;
-        }
+        .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder input::placeholder { color: #a0a090 !important; }
+        .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder--icon-search { display: none !important; }
+        .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder--button { background: transparent !important; padding: 0 8px !important; }
         .hero-address-wrapper .canopy-geocoder .suggestions {
-          border-radius: 16px !important;
-          box-shadow: 0 8px 28px rgba(26,26,22,0.14) !important;
-          border: 1px solid rgba(26,26,22,0.08) !important;
-          overflow: hidden;
-          z-index: 100;
+          border-radius: 16px !important; box-shadow: 0 8px 28px rgba(26,26,22,0.14) !important;
+          border: 1px solid rgba(26,26,22,0.08) !important; overflow: hidden; z-index: 100;
         }
         .hero-address-wrapper .canopy-geocoder .suggestions > li > a {
-          font-family: 'Inter Tight', sans-serif !important;
-          font-size: 0.86rem !important;
-          color: #1a1a16 !important;
-          padding: 12px 18px !important;
+          font-family: 'Inter Tight', sans-serif !important; font-size: 0.86rem !important;
+          color: #1a1a16 !important; padding: 12px 18px !important;
         }
         .hero-address-wrapper .canopy-geocoder .suggestions > .active > a,
         .hero-address-wrapper .canopy-geocoder .suggestions > li > a:hover {
-          background-color: #f0ece3 !important;
-          color: #1a1a16 !important;
+          background-color: #f0ece3 !important; color: #1a1a16 !important;
         }
       `}</style>
     </div>

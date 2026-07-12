@@ -1,6 +1,5 @@
 import { useState, useRef, useMemo, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useSaveAndExit } from '../hooks/useSaveAndExit';
 import MapGL, { Source, Layer, NavigationControl, type MapRef } from 'react-map-gl';
 import * as turf from '@turf/turf';
 import 'mapbox-gl/dist/mapbox-gl.css';
@@ -58,7 +57,6 @@ type PanelTab = 'plan' | 'catalog';
 
 export default function DiyRefinePage() {
   const navigate = useNavigate();
-  const saveAndExit = useSaveAndExit();
   const mapRef   = useRef<MapRef>(null);
 
   const sc    = (() => { try { return JSON.parse(localStorage.getItem('siteContext')     || '{}'); } catch { return {}; } })();
@@ -337,10 +335,6 @@ export default function DiyRefinePage() {
             <span style={{ fontFamily: IT, fontSize: '0.72rem', color: '#9A9A92', fontStyle: 'italic' }}>curating palette…</span>
           )}
         </div>
-        <button onClick={saveAndExit}
-          style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-          Save & exit ↗
-        </button>
       </div>
 
       {/* Body: 50/50 split */}

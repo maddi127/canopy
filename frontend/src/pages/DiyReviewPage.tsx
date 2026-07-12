@@ -2,11 +2,26 @@ import { useMemo, useRef, useState, useLayoutEffect, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
 import IllustrativeSite from '../components/IllustrativeSite';
+import YardIllustration from '../components/YardIllustration';
+import BuildPlan from '../components/BuildPlan';
+import {
+  buildPlantClusters, paintPlantClusters, paintSketchFeaturePoly, paintSketchGroundFill,
+  paintLawnMowerArcs, paintPathEdges, paintPathBody, darkenHex, type PlantMarker, type Layer,
+} from '../lib/planPainter';
 
 const BG = '#efe9db';
 const DARK = '#2A2A26';
 const IS = "'Instrument Serif', serif";
 const IT = "'Inter Tight', sans-serif";
+
+// Side-by-side hero panels (aerial + street view). Matched height keeps the two columns aligned.
+const REVIEW_HERO_H = 320;
+const heroBadge = (dark = false): React.CSSProperties => ({
+  position: 'absolute', top: 18, left: 18, zIndex: 5,
+  fontFamily: IT, fontSize: '0.74rem', fontWeight: 600, padding: '6px 13px', borderRadius: 999,
+  background: dark ? DARK : 'white', color: dark ? '#efe9db' : DARK,
+  boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
+});
 
 // ── Label / color maps (mirrors DiyPlacementPage) ───────────────────────────────
 const FEATURE_MATERIAL_LABEL: Record<string, string> = {
@@ -23,6 +38,9 @@ const VARIANT_COLOR: Record<string, string> = {
 };
 const MATERIAL_COLOR: Record<string, string> = { mulch: '#8B6B4A', rock: '#9A9A8C', lawn: '#8DAA6A' };
 const PATH_COLOR = '#6E7681';
+// Features whose surface is a built/hardscape material (matches the editor).
+const MATERIAL_FEATURES = new Set(['seating', 'dining', 'cooking', 'storage']);
+const zoneTexFor = (z: any): string | null => z.key === 'lawn' ? 'grass' : z.key === 'water' ? 'water' : z.key === 'garden' ? 'soil' : z.material ? z.material : MATERIAL_FEATURES.has(z.key) ? 'gravel' : null;
 const cap = (s: string) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 
 // ── Geometry helpers (all coords already in feet) ───────────────────────────────
@@ -114,11 +132,11 @@ function buildCSReview(verts: [number, number][]) {
 
 // Read-only illustrative plan for the review page: the hand-drawn IllustrativeSite base + an overlay
 // canvas drawing the placed features / beds / walkways / plants, plus perimeter dimensions.
-function ReviewPlan({ plan }: { plan: Plan }) {
+function ReviewPlan({ plan, selSpecies, onSelectSpecies, height = 460 }: { plan: Plan; selSpecies: string | null; onSelectSpecies: (name: string | null) => void; height?: number }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [w, setW] = useState(760);
-  const H = 460, P = 48;
+  const H = height, P = 48;
   useEffect(() => {
     const el = wrapRef.current; if (!el) return;
     const ro = new ResizeObserver(([e]) => setW(e.contentRect.width));
@@ -190,40 +208,74 @@ function ReviewPlan({ plan }: { plan: Plan }) {
     ctx.clearRect(0, 0, w, H);
     const scale = Math.hypot(affine.a, affine.b); // uniform scale (rotation-aware)
     const toPx = (x: number, y: number): [number, number] => [affine.a * x + affine.c * y + affine.e, affine.b * x + affine.d * y + affine.f];
-    const ring = (r: [number, number][]) => { ctx.beginPath(); r.forEach(([x, y], i) => { const [px, py] = toPx(x, y); if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py); }); ctx.closePath(); };
+    const ringPx = (r: [number, number][]): [number, number][] => r.map(([x, y]) => toPx(x, y));
     const centroid = (r: [number, number][]): [number, number] => { let x = 0, y = 0; for (const [px, py] of r) { x += px; y += py; } return [x / r.length, y / r.length]; };
+    const tracePx = (pr: [number, number][]) => { ctx.beginPath(); pr.forEach(([px, py], i) => { if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py); }); ctx.closePath(); };
 
-    // Features + lawns.
-    for (const z of plan.zones) {
-      const r = ringForShape(z); if (r.length < 3) continue;
-      const color = z.key === 'lawn' ? MATERIAL_COLOR.lawn : z.material ? FEATURE_MATERIAL_COLOR[z.material] : z.color || '#B5A07A';
-      ring(r); ctx.fillStyle = color + 'D9'; ctx.fill(); ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.stroke();
-      const [cx, cy] = centroid(r.map(([x, y]) => toPx(x, y)));
+    // Primary open ground: colour wash + mulch/pebble tile, carved around the house/obstacles.
+    const bdy0 = plan.boundary || [];
+    const pv = plan.primary?.variant as string | undefined;
+    if (pv && VARIANT_COLOR[pv] && bdy0.length >= 3) {
+      const kind: 'mulch' | 'pebble' = (pv === 'river' || pv === 'pea' || pv === 'lava') ? 'pebble' : 'mulch';
+      const obstacles: [number, number][][] = cs
+        ? existing.filter(f => f.keep && (f.type === 'house' || f.type === 'structure' || f.type === 'hardscape') && (f.vertices?.length ?? 0) >= 3)
+            .map(f => f.vertices.map((v: [number, number]) => cs.toXY(v[0], v[1])) as [number, number][])
+        : [];
+      ctx.save();
+      tracePx(ringPx(bdy0));
+      for (const ob of obstacles) { const pr = ringPx(ob); ctx.moveTo(pr[0][0], pr[0][1]); for (let i = 1; i < pr.length; i++) ctx.lineTo(pr[i][0], pr[i][1]); ctx.closePath(); }
+      ctx.clip('evenodd');
+      paintSketchGroundFill(ctx, [ringPx(bdy0)], { color: VARIANT_COLOR[pv], kind });
+      ctx.restore();
+    }
+
+    const drawZone = (z: any) => {
+      const r = ringForShape(z); if (r.length < 3) return;
+      const zc = z.key === 'lawn' ? MATERIAL_COLOR.lawn : z.material ? FEATURE_MATERIAL_COLOR[z.material] : z.color || '#B5A07A';
+      const rings = [ringPx(r)];
+      const lawnInk = z.key === 'lawn' ? darkenHex((zc.slice(0, 7) || '#8daa6a'), 0.62) : null;
+      paintSketchFeaturePoly(ctx, rings, { fill: zc, stroke: zc, lineWidth: 1.5, tex: zoneTexFor(z), active: false, ink: lawnInk });
+      if (z.key === 'lawn') {
+        let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
+        for (const [x, y] of r) { mnx = Math.min(mnx, x); mny = Math.min(mny, y); mxx = Math.max(mxx, x); mxy = Math.max(mxy, y); }
+        paintLawnMowerArcs(ctx, rings, toPx(mnx, mny), toPx(mxx, mxy), lawnInk || 'rgba(74,92,52,0.8)');
+      }
+      const [cx, cy] = centroid(ringPx(r));
       ctx.font = `600 11px ${IT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(247,243,234,0.95)'; ctx.strokeText(z.label || '', cx, cy);
       ctx.fillStyle = '#2A2A26'; ctx.fillText(z.label || '', cx, cy);
-    }
-    // Beds.
+    };
+
+    // Lawn (bottom) → beds → feature zones, matching the editor's paint order.
+    for (const z of plan.zones) if (z.key === 'lawn') drawZone(z);
     for (const b of plan.beds) {
       const r = ringForShape(b); if (r.length < 3) continue;
       const color = b.variant ? VARIANT_COLOR[b.variant] : MATERIAL_COLOR[b.material] || '#8B6B4A';
-      ring(r); ctx.fillStyle = color + 'B0'; ctx.fill(); ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.stroke();
+      const tex = b.material === 'lawn' ? 'grass' : b.material === 'rock' ? 'rock' : 'mulch';
+      paintSketchFeaturePoly(ctx, [ringPx(r)], { fill: color, stroke: color, lineWidth: 1, tex, active: false, ink: null });
     }
-    // Walkways / dry creek beds.
+    for (const z of plan.zones) if (z.key !== 'lawn') drawZone(z);
+
+    // Walkways / dry creek beds — keep geometry + colour, add wobbly inked edges.
     for (const p of plan.paths) {
       const pts = p.pts || []; if (pts.length < 2) continue;
-      ctx.beginPath(); pts.forEach(([x, y]: [number, number], i: number) => { const [px, py] = toPx(x, y); if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py); });
-      ctx.strokeStyle = p.color || PATH_COLOR; ctx.lineWidth = Math.max(2, (p.widthFt || 3) * scale); ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.globalAlpha = 0.9; ctx.stroke(); ctx.globalAlpha = 1;
+      const pxPts = pts.map(([x, y]: [number, number]) => toPx(x, y)) as [number, number][];
+      const wpx = Math.max(2, (p.widthFt || 3) * scale);
+      // Drafted material body inside the corridor (flagstone / pavers / brick / concrete / gravel / creek).
+      paintPathBody(ctx, pxPts, wpx, scale, { material: p.material, kind: p.kind, color: p.color, id: p.id });
+      if (p.kind !== 'creek') paintPathEdges(ctx, pxPts, wpx);
     }
-    // Plants (ordered groundcover → tree so overstory sits on top).
-    const orderRank: Record<string, number> = { groundcover: 0, shrub: 1, large_shrub: 2, tree: 3 };
-    for (const pl of [...plants].sort((a, b) => (orderRank[a.layer] ?? 0) - (orderRank[b.layer] ?? 0))) {
-      const [px, py] = toPx(pl.x, pl.y);
-      const rPx = Math.max(pl.layer === 'groundcover' ? 2.5 : 4, ((pl.widthFt || 2) / 2) * scale);
-      const color = pl.color || '#5a7a50';
-      ctx.beginPath(); ctx.arc(px, py, rPx, 0, Math.PI * 2); ctx.fillStyle = color + (pl.layer === 'groundcover' ? '9C' : 'CC'); ctx.fill();
-      ctx.lineWidth = pl.layer === 'tree' ? 1.6 : 1.1; ctx.strokeStyle = color; ctx.stroke();
-      if (pl.layer === 'tree') { ctx.beginPath(); ctx.arc(px, py, 1.8, 0, Math.PI * 2); ctx.fillStyle = '#5a4632'; ctx.fill(); }
+    // Plants — full colored-pencil cluster symbology (feet coords → px), clipped to the yard.
+    const markers: PlantMarker[] = [];
+    for (const pl of plants) {
+      if (typeof pl?.x !== 'number' || typeof pl?.y !== 'number') continue;
+      markers.push({ x: pl.x, y: pl.y, rFt: (pl.widthFt || 2) / 2, color: pl.color || '#5a7a50', kind: (pl.layer || 'shrub') as Layer, name: pl.name || String(pl.layer || '') });
+    }
+    if (markers.length) {
+      ctx.save();
+      if (bdy0.length >= 3) { tracePx(ringPx(bdy0)); ctx.clip(); }
+      paintPlantClusters(ctx, buildPlantClusters(markers), toPx, scale, { highlightName: selSpecies });
+      ctx.restore();
     }
     // Perimeter dimensions — length of each boundary edge, offset outward from the yard centre.
     const bdy = plan.boundary; if (bdy.length >= 2) {
@@ -241,18 +293,53 @@ function ReviewPlan({ plan }: { plan: Plan }) {
         ctx.fillStyle = '#5A6270'; ctx.fillText(label, mx, my);
       }
     }
-  }, [affine, w, plan, plants]);
+  }, [affine, w, plan, plants, cs, existing, selSpecies]);
+
+  // Click a plant on the map → highlight its species (toggle off if re-clicked); empty plan → clear.
+  // Invert the affine (det inverse, same math as DiyPlacementPage's pxToFt) to get feet, then linear-
+  // scan for the nearest instance within max(its rFt, 2.5ft).
+  const onCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!affine) return;
+    const cv = canvasRef.current; if (!cv) return;
+    const rect = cv.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const det = affine.a * affine.d - affine.b * affine.c;
+    if (!det) return;
+    const u = mx - affine.e, v = my - affine.f;
+    const fx = (affine.d * u - affine.c * v) / det, fy = (-affine.b * u + affine.a * v) / det;
+    let bestName: string | null = null, bestD = Infinity;
+    for (const pl of plants) {
+      if (typeof pl?.x !== 'number' || typeof pl?.y !== 'number') continue;
+      const rFt = (pl.widthFt || 2) / 2;
+      const d = Math.hypot(pl.x - fx, pl.y - fy);
+      if (d <= Math.max(rFt, 2.5) && d < bestD) { bestD = d; bestName = pl.name || String(pl.layer || ''); }
+    }
+    onSelectSpecies(bestName); // parent toggles null when re-selected; null clears
+  };
 
   return (
     <div ref={wrapRef} style={{ position: 'relative', width: '100%', height: H, background: '#EFE9DA', borderRadius: 12, overflow: 'hidden' }}>
       {affine && <div style={{ position: 'absolute', inset: 0 }}><IllustrativeSite width={w} height={H} animate={false} transform={affine} /></div>}
-      <canvas ref={canvasRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }} />
+      <canvas ref={canvasRef} onClick={onCanvasClick} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', cursor: 'pointer' }} />
+      {selSpecies && (
+        <button type="button" onClick={() => onSelectSpecies(null)}
+          style={{ position: 'absolute', top: 56, left: 12, display: 'inline-flex', alignItems: 'center', gap: 7, fontFamily: IT, fontSize: '0.78rem', fontWeight: 600, color: DARK, background: 'rgba(247,243,234,0.95)', border: '1px solid rgba(42,42,38,0.16)', borderRadius: 999, padding: '6px 12px', cursor: 'pointer', boxShadow: '0 1px 6px rgba(42,42,38,0.12)' }}>
+          Highlighting: {selSpecies}
+          <span aria-hidden style={{ fontSize: '0.9rem', lineHeight: 1, opacity: 0.7 }}>✕</span>
+        </button>
+      )}
     </div>
   );
 }
 
+
 export default function DiyReviewPage() {
   const navigate = useNavigate();
+
+  // Selected plant species to highlight across the plan map + the plants table. Toggling the same
+  // name (or passing null) clears it.
+  const [selSpecies, setSelSpecies] = useState<string | null>(null);
+  const toggleSpecies = (name: string | null) => setSelSpecies(cur => (name && cur === name) ? null : name);
 
   const plan = useMemo<Plan>(() => {
     try {
@@ -262,6 +349,8 @@ export default function DiyReviewPage() {
       return { zones: [], beds: [], paths: [], primary: { material: null, variant: null }, boundary: [], obstacles: [], projectAreaFt: 0, primaryGroundAreaFt: 0, address: '' };
     }
   }, []);
+
+  const instances = useMemo<any[]>(() => { try { return JSON.parse(localStorage.getItem('diyPlantInstances') || '[]'); } catch { return []; } }, []);
 
   const features = plan.zones.filter(z => z.key !== 'lawn');
   const lawns    = plan.zones.filter(z => z.key === 'lawn');
@@ -336,6 +425,9 @@ export default function DiyReviewPage() {
           .review-page { background: white !important; }
           .review-card { box-shadow: none !important; border: 1px solid rgba(42,42,38,0.12); }
         }
+        @media (max-width: 640px) {
+          .review-hero { grid-template-columns: 1fr !important; }
+        }
       `}</style>
 
       <div className="review-page" style={{ maxWidth: 820, margin: '0 auto', padding: '32px 28px 80px' }}>
@@ -358,10 +450,27 @@ export default function DiyReviewPage() {
           </div>
         </div>
 
-        {/* Plan view — the illustrative plan, read-only, with perimeter dimensions */}
-        <div className="review-card" style={{ ...card, padding: 10 }}>
-          <ReviewPlan plan={plan} />
-        </div>
+        {/* Aerial plan + street-view illustration, side by side (matches the draft/plan-ready page). */}
+        {(plan.zones.length > 0 || plan.paths.length > 0) && (
+          <div className="review-hero" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 18 }}>
+            <div className="review-card" style={{ ...card, padding: 10, marginBottom: 0, position: 'relative' }}>
+              <span style={heroBadge()}>Plan view</span>
+              <ReviewPlan plan={plan} selSpecies={selSpecies} onSelectSpecies={toggleSpecies} height={REVIEW_HERO_H} />
+            </div>
+            <div className="review-card" style={{ ...card, padding: 10, marginBottom: 0, position: 'relative' }}>
+              <span style={heroBadge(true)}>Street view</span>
+              <div style={{ position: 'relative', width: '100%', height: REVIEW_HERO_H, borderRadius: 12, overflow: 'hidden', background: '#f6f1e6' }}>
+                <YardIllustration />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Weekend-by-weekend build plan (surfaced from the draft flow). Shopping list is skipped
+            here — the Features/beds/plants tables below already inventory the plan. */}
+        {(plan.zones.length > 0 || plan.paths.length > 0) && (
+          <BuildPlan plan={plan} instances={instances} showShoppingList={false} cardClassName="review-card" />
+        )}
 
         {/* Features */}
         {(features.length > 0 || lawns.length > 0) && (
@@ -455,13 +564,25 @@ export default function DiyReviewPage() {
           <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
             <thead><tr><th style={{ ...th, width: '52%' }}>Plant</th><th style={{ ...th, width: '30%' }}>Type</th><th style={{ ...th, width: '18%', textAlign: 'right', paddingRight: 0 }}>Qty</th></tr></thead>
             <tbody>
-              {plantRows.map(p => (
-                <tr key={p.name}>
-                  <td style={td}><Swatch color={p.color} round />{p.name}</td>
-                  <td style={td}>{p.typeLabel}</td>
-                  <td style={{ ...td, textAlign: 'right', paddingRight: 0, fontWeight: 600 }}>{p.count}</td>
-                </tr>
-              ))}
+              {plantRows.map(p => {
+                const sel = selSpecies === p.name;
+                // Selected row: soft fill + a left accent bar (drawn via a colored left border on the
+                // first cell so it survives tableLayout:fixed and prints cleanly).
+                const rowTd: React.CSSProperties = sel ? { ...td, background: '#F4F0E6' } : td;
+                const firstTd: React.CSSProperties = sel
+                  ? { ...rowTd, boxShadow: 'inset 3px 0 0 0 #2A2A26' }
+                  : rowTd;
+                return (
+                  <tr key={p.name} role="button" tabIndex={0}
+                    onClick={() => toggleSpecies(p.name)}
+                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSpecies(p.name); } }}
+                    style={{ cursor: 'pointer' }}>
+                    <td style={firstTd}><Swatch color={p.color} round />{p.name}</td>
+                    <td style={rowTd}>{p.typeLabel}</td>
+                    <td style={{ ...rowTd, textAlign: 'right', paddingRight: 0, fontWeight: 600 }}>{p.count}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -470,17 +591,6 @@ export default function DiyReviewPage() {
         <p style={{ fontFamily: IT, fontSize: '0.75rem', color: '#A8A89C', textAlign: 'center', marginTop: 8 }}>
           Areas are approximate footprints based on your layout.
         </p>
-
-        <div className="no-print" style={{ display: 'flex', justifyContent: 'center', gap: 12, marginTop: 28 }}>
-          <button onClick={() => navigate('/diy/yard-3d')}
-            style={{ fontFamily: IT, fontSize: '0.95rem', fontWeight: 500, color: DARK, background: 'white', border: '1.5px solid rgba(42,42,38,0.16)', cursor: 'pointer', padding: '13px 26px', borderRadius: 999 }}>
-            View in 3D ↗
-          </button>
-          <button onClick={() => window.print()}
-            style={{ fontFamily: IT, fontSize: '0.95rem', fontWeight: 500, color: '#efe9db', background: DARK, border: 'none', cursor: 'pointer', padding: '13px 30px', borderRadius: 999 }}>
-            Print / Save as PDF
-          </button>
-        </div>
       </div>
     </div>
   );

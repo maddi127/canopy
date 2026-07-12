@@ -6,9 +6,10 @@ const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN || '';
 
 interface AddressInputProps {
   onAddressSelect: (address: string, lat: number, lng: number) => void;
+  placeholder?: string;
 }
 
-export default function AddressInput({ onAddressSelect }: AddressInputProps) {
+export default function AddressInput({ onAddressSelect, placeholder = 'Enter your home address to start designing' }: AddressInputProps) {
   const geocoderContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -16,7 +17,7 @@ export default function AddressInput({ onAddressSelect }: AddressInputProps) {
 
     const geocoder = new MapboxGeocoder({
       accessToken: MAPBOX_TOKEN,
-      placeholder: 'Enter your home address to start designing',
+      placeholder,
       countries: 'us',
     });
 
@@ -32,7 +33,7 @@ export default function AddressInput({ onAddressSelect }: AddressInputProps) {
     return () => {
       geocoder.onRemove();
     };
-  }, [onAddressSelect]);
+  }, [onAddressSelect, placeholder]);
 
   return (
     <div>

@@ -1,6 +1,5 @@
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useSaveAndExit } from '../hooks/useSaveAndExit';
 import Logo from '../components/Logo';
 import { PLANTS, type Plant } from '../features/planting/plantDatabase';
 
@@ -81,7 +80,6 @@ function priorityBadge(priority: string): string {
 
 export default function DiyPlanPage() {
   const navigate = useNavigate();
-  const saveAndExit = useSaveAndExit();
 
   // Load all persisted state
   const conceptImage = localStorage.getItem('diyFinalConcept') || localStorage.getItem('generatedConcept') || '';
@@ -146,12 +144,6 @@ export default function DiyPlanPage() {
       {/* Header */}
       <div className="flex items-center justify-between px-10 py-4 flex-shrink-0 no-print">
         <Logo />
-        <button
-          onClick={saveAndExit}
-          style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}
-        >
-          Save & exit ↗
-        </button>
       </div>
 
       {/* Title */}

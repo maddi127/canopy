@@ -4,7 +4,7 @@ import { Leaf, Star, Flower2, Heart, Droplets, Shield, TreePine, Armchair, Utens
 import Logo from '../components/Logo';
 import AppStepper from '../components/AppStepper';
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6;
+type Step = 1 | 2 | 3 | 4; // 1 yard · 2 style · 3 features · 4 photo (goals + lawn questions removed for now)
 
 const IT = "'Inter Tight', sans-serif";
 const IS = "'Instrument Serif', serif";
@@ -40,19 +40,20 @@ const ALL_FEATURES = [
   { id: 'storage',  label: 'Storage shed',     backOnly: true,  icon: Package         },
 ];
 
-const LAWN_OPTIONS = [
-  { id: 'none', label: 'None',    value: 0,    desc: 'Only planted areas and hardscapes'  },
-  { id: 'some', label: 'Some',    value: 0.33, desc: 'A modest open area for pets or kids' },
-  { id: 'lot',  label: 'A lot',   value: 0.67, desc: 'Lawn is a central part of the yard' },
-];
+// The lawn question was removed — default by style + yard side (editable later on the plan):
+// front yards: traditional/modern get some lawn, whimsical/desert none;
+// back yards:  traditional/modern get a lot, whimsical/desert some.
+function defaultLawnTarget(style: string, yardType: string): number {
+  const turfy = style === 'traditional' || style === 'modern_structured';
+  if (yardType === 'front') return turfy ? 0.33 : 0;
+  return turfy ? 0.67 : 0.33;
+}
 
 const QUESTIONS: Record<Step, string> = {
   1: 'What space would you like to design?',
   2: 'What style are you going for?',
-  3: 'What are your priorities?',
-  4: 'What features would you like?',
-  5: 'How much lawn would you like?',
-  6: 'Add a photo of your yard',
+  3: 'What features would you like?',
+  4: 'Add a photo of your yard',
 };
 
 function FrontYardIllustration() {
@@ -112,18 +113,16 @@ function BackYardIllustration() {
   );
 }
 
-export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath?: string; skipPhoto?: boolean } = {}) {
+export default function PreferencesGoalsPage({ nextPath, skipPhoto, journeyTotal }: { nextPath?: string; skipPhoto?: boolean; journeyTotal?: number } = {}) {
   const navigate = useNavigate();
   const location = useLocation();
   const sc    = (() => { try { return JSON.parse(localStorage.getItem('siteContext')     || '{}'); } catch { return {}; } })();
   const saved = (() => { try { return JSON.parse(localStorage.getItem('userPreferences') || '{}'); } catch { return {}; } })();
 
-  const [step,             setStep]             = useState<Step>(((location.state as any)?.step as Step) || 1);
+  const [step,             setStep]             = useState<Step>(() => { const s = (location.state as any)?.step as number | undefined; return (s && s >= 1 && s <= 4 ? s : 1) as Step; });
   const [yardType,         setYardType]         = useState<string>(sc.yard_type || '');
   const [style,            setStyle]            = useState<string>(saved.style || '');
-  const [selectedGoals,    setSelectedGoals]    = useState<string[]>(saved.goal_priority || []);
   const [selectedFeatures, setSelectedFeatures] = useState<string[]>(saved.space_usage   || []);
-  const [selectedLawn,     setSelectedLawn]     = useState<string>(LAWN_OPTIONS.find(o => o.value === saved.lawnTarget)?.id ?? '');
   const [photo,            setPhoto]            = useState<string | null>(sc.photo || null);
   const [dragging,         setDragging]         = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -143,10 +142,6 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
     setTimeout(() => setStep(3), 520);
   };
 
-  const toggleGoal = (id: string) => {
-    setSelectedGoals(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
-  };
-
   const toggleFeature = (id: string) => {
     setSelectedFeatures(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   };
@@ -157,14 +152,16 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
     reader.readAsDataURL(file);
   };
 
-  const handleFinish = (lawnId = selectedLawn) => {
+  const handleFinish = () => {
     const validIds = new Set(ALL_FEATURES.filter(f => yardType !== 'front' || !f.backOnly).map(f => f.id));
+    // Goals + lawn questions are gone for now — carry any previously saved values, else defaults.
+    const goals: string[] = Array.isArray(saved.goal_priority) ? saved.goal_priority : [];
     localStorage.setItem('userPreferences', JSON.stringify({
       style,
-      goal_priority:  selectedGoals,
-      not_important:  ALL_GOALS.filter(g => !selectedGoals.includes(g.id)).map(g => g.id),
+      goal_priority:  goals,
+      not_important:  ALL_GOALS.filter(g => !goals.includes(g.id)).map(g => g.id),
       space_usage:    selectedFeatures.filter(id => validIds.has(id)),
-      lawnTarget:     LAWN_OPTIONS.find(o => o.id === lawnId)?.value ?? null,
+      lawnTarget:     defaultLawnTarget(style, yardType),
     }));
     const existing = (() => { try { return JSON.parse(localStorage.getItem('siteContext') || '{}'); } catch { return {}; } })();
     localStorage.setItem('siteContext', JSON.stringify({
@@ -175,27 +172,19 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
     navigate(nextPath ?? '/concept-generating');
   };
 
-  const handleLawn = (id: string) => {
-    setSelectedLawn(id);
-    setTimeout(() => {
-      if (skipPhoto) handleFinish(id);
-      else setStep(6 as Step);
-    }, 520);
-  };
-
   const visibleFeatures = ALL_FEATURES.filter(f => yardType !== 'front' || !f.backOnly);
 
   return (
     <div className="min-h-screen flex flex-col pt-8 pb-24 relative" style={{ backgroundColor: '#efe9db' }}>
 
       {/* Header */}
-      <div className="flex items-start justify-between px-10 mb-6 flex-shrink-0">
+      <div className="flex items-start justify-between px-10 flex-shrink-0">
         <Logo />
-        <AppStepper step={step} total={skipPhoto ? 5 : 6} />
+        <AppStepper step={step} total={journeyTotal ?? (skipPhoto ? 3 : 4)} />
       </div>
 
       {/* Question heading */}
-      <h1 style={{ fontFamily: IS, fontSize: '4rem', color: '#2A2A26', lineHeight: 1.05, marginTop: '2rem', marginBottom: '3.5rem', paddingLeft: '8rem' }}>
+      <h1 style={{ fontFamily: IS, fontSize: '4rem', color: '#2A2A26', lineHeight: 1.05, marginTop: '1.33rem', marginBottom: '1.6rem', paddingLeft: '2.5rem' }}>
         {QUESTIONS[step]}
       </h1>
 
@@ -273,40 +262,8 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
         </div>
       )}
 
-      {/* ── Step 3: Goals ─────────────────────────────────────────── */}
+      {/* ── Step 3: Features ──────────────────────────────────────── */}
       {step === 3 && (
-        <div className="flex flex-col gap-5 mx-auto" style={{ width: '75%' }}>
-          <div className="flex flex-wrap justify-center gap-4">
-            {ALL_GOALS.map(goal => {
-              const selected = selectedGoals.includes(goal.id);
-              const Icon = goal.icon;
-              return (
-                <button
-                  key={goal.id}
-                  onClick={() => toggleGoal(goal.id)}
-                  className="rounded-3xl focus:outline-none transition-all duration-300 hover:-translate-y-1 active:translate-y-0 flex flex-col items-center justify-center gap-3 p-6"
-                  style={{
-                    width: 'calc(33.33% - 11px)',
-                    height: '150px',
-                    backgroundColor: selected ? '#C8DFC8' : '#F4EAD2',
-                    border: selected ? '2px solid #1A1A16' : '1.5px solid rgba(26,26,22,0.18)',
-                    transition: 'background-color 0.3s ease, transform 0.2s ease',
-                  }}
-                >
-                  <Icon className="w-5 h-5" style={{ color: '#2A2A26' }} strokeWidth={1.5} />
-                  <span style={{ fontFamily: IS, fontSize: '1.4rem', color: '#2A2A26', fontWeight: 400, lineHeight: 1.1, textAlign: 'center' }}>
-                    {goal.label}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-        </div>
-      )}
-
-      {/* ── Step 4: Features ──────────────────────────────────────── */}
-      {step === 4 && (
         <div className="mx-auto" style={{ width: '75%' }}>
           <div className="flex flex-wrap justify-center gap-4">
             {visibleFeatures.map(opt => {
@@ -336,39 +293,8 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
         </div>
       )}
 
-      {/* ── Step 5: Lawn ─────────────────────────────────────────── */}
-      {step === 5 && (
-        <div className="mx-auto" style={{ width: '75%' }}>
-          <div className="flex gap-4">
-            {LAWN_OPTIONS.map(opt => {
-              const active = selectedLawn === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  onClick={() => handleLawn(opt.id)}
-                  className="rounded-3xl focus:outline-none transition-all duration-300 hover:-translate-y-1 active:translate-y-0 flex flex-col items-center justify-center gap-2 p-6 flex-1"
-                  style={{
-                    height: '150px',
-                    backgroundColor: active ? '#C8DFC8' : '#F4EAD2',
-                    border: active ? '2px solid #1A1A16' : '1.5px solid rgba(26,26,22,0.18)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span style={{ fontFamily: IS, fontSize: '1.8rem', color: '#2A2A26', fontWeight: 400 }}>
-                    {opt.label}
-                  </span>
-                  <span style={{ fontFamily: IT, fontSize: '0.8rem', color: '#7A7A73' }}>
-                    {opt.desc}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* ── Step 6: Photo upload ──────────────────────────────────── */}
-      {!skipPhoto && step === 6 && (
+      {/* ── Step 4: Photo upload ──────────────────────────────────── */}
+      {!skipPhoto && step === 4 && (
         <div className="mx-auto flex flex-col items-center gap-6" style={{ width: '75%', maxWidth: '640px' }}>
           <p style={{ fontFamily: IT, fontSize: '0.9rem', color: '#7A7A73', textAlign: 'center', lineHeight: 1.6 }}>
             A photo helps us generate concepts that match your home's architecture. You can skip this if you don't have one handy.
@@ -418,30 +344,20 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto }: { nextPath
         </button>
       )}
 
-      {/* Continue — fixed bottom-right, steps 3–4 and 6 */}
-      {(step === 3 || step === 4 || step === 6) && (() => {
-        const hasSelection = step === 3 ? selectedGoals.length > 0
-                           : step === 4 ? selectedFeatures.length > 0
-                           : photo !== null;
-        const onClick = step === 3 ? () => setStep(4)
-                      : step === 4 ? () => setStep(5 as Step)
-                      : () => handleFinish();
-        const primaryLabel = step === 6 ? 'Generate concepts →' : 'Continue →';
-        const skipLabel    = step === 6 ? 'Skip, generate without photo →' : 'Skip →';
+      {/* Continue — fixed bottom-right, features + photo steps */}
+      {(step === 3 || step === 4) && (() => {
+        const advance = () => { if (step === 3) { if (skipPhoto) handleFinish(); else setStep(4); } else handleFinish(); };
+        const hasSelection = step === 3 ? selectedFeatures.length > 0 : photo !== null;
+        const primaryLabel = step === 4 ? 'Generate concepts →' : 'Continue →';
+        const skipLabel    = step === 4 ? 'Skip, generate without photo →' : 'None of these →';
         return hasSelection ? (
-          <button onClick={onClick}
+          <button onClick={advance}
             className="fixed bottom-8 right-10 flex items-center gap-2.5 px-7 py-3.5 rounded-full transition-all hover:opacity-90"
             style={{ backgroundColor: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500 }}>
             {primaryLabel}
           </button>
-        ) : step === 4 ? (
-          <button onClick={() => { setSelectedFeatures([]); setStep(5 as Step); }}
-            className="fixed bottom-8 right-10 transition-all hover:opacity-70"
-            style={{ color: '#A8A8A0', fontFamily: IT, fontSize: '0.85rem' }}>
-            None of these →
-          </button>
         ) : (
-          <button onClick={onClick}
+          <button onClick={() => { if (step === 3) setSelectedFeatures([]); advance(); }}
             className="fixed bottom-8 right-10 transition-all hover:opacity-70"
             style={{ color: '#A8A8A0', fontFamily: IT, fontSize: '0.85rem' }}>
             {skipLabel}

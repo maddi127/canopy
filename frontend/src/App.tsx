@@ -11,11 +11,19 @@ import AddressPage from './pages/AddressPage';
 import PreferencesGoalsPage from './pages/PreferencesGoalsPage';
 import PaymentPage from './pages/PaymentPage';
 
+// ── Draft-first flow ────────────────────────────────────────────────────────────
+import DraftStartPage   from './pages/draft/DraftStartPage';
+import DraftScanPage    from './pages/draft/DraftScanPage';
+import DraftConfirmPage from './pages/draft/DraftConfirmPage';
+import DraftPlanPage    from './pages/draft/DraftPlanPage';
+import DraftOutputPage  from './pages/draft/DraftOutputPage';
+
 // ── DIY flow ──────────────────────────────────────────────────────────────────
 import DiyPreferencesPage    from './pages/DiyPreferencesPage';
 import DiyConceptPage        from './pages/DiyConceptPage';
 import DiyPaymentPage        from './pages/DiyPaymentPage';
 import DiyBoundaryPage       from './pages/DiyBoundaryPage';
+import DiyPlanReadyPage      from './pages/DiyPlanReadyPage';
 import DiyFeatureConfirmPage from './pages/DiyFeatureConfirmPage';
 import DiyRefinePage         from './pages/DiyRefinePage';
 import DiyFinalRenderPage    from './pages/DiyFinalRenderPage';
@@ -45,15 +53,25 @@ function App() {
 
               <Route path="/" element={<HomePage />} />
               <Route path="/start" element={<AddressPage />} />
-              <Route path="/preferences" element={<PreferencesGoalsPage nextPath="/diy/boundary" skipPhoto />} />
+
+              {/* Draft-first flow: address → scan + quick picks → one-tap boundary confirm →
+                  draft plan (simplified edits) → weekend build plan. No auth gate. */}
+              <Route path="/draft"         element={<DraftStartPage />} />
+              <Route path="/draft/scan"    element={<DraftScanPage />} />
+              <Route path="/draft/confirm" element={<DraftConfirmPage />} />
+              <Route path="/draft/plan"    element={<DraftPlanPage />} />
+              <Route path="/draft/output"  element={<DraftOutputPage />} />
+              <Route path="/preferences" element={<PreferencesGoalsPage nextPath="/diy/boundary" skipPhoto journeyTotal={6} />} />
               <Route path="/payment"     element={<PaymentPage />} />
 
-              {/* DIY: preferences is open; sign-in is required from the boundary step on */}
+              {/* DIY: preferences + boundary + plan-ready are OPEN; account creation is required
+                  when leaving "your draft plan is ready" for the editor (auto-layout onward). */}
               <Route path="/diy/preferences"     element={<DiyPreferencesPage />} />
+              <Route path="/diy/boundary"        element={<DiyBoundaryPage />} />
+              <Route path="/diy/plan-ready"      element={<DiyPlanReadyPage />} />
               <Route element={<RequireAuth><Outlet /></RequireAuth>}>
                 <Route path="/diy/concept"         element={<DiyConceptPage />} />
                 <Route path="/diy/payment"         element={<DiyPaymentPage />} />
-                <Route path="/diy/boundary"        element={<DiyBoundaryPage />} />
                 <Route path="/diy/plants"          element={<DiyPlantSelectPage />} />
                 <Route path="/diy/feature-confirm" element={<DiyFeatureConfirmPage />} />
                 <Route path="/diy/plan-reveal"     element={<DiyPlanRevealPage />} />

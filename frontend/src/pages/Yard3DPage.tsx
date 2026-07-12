@@ -19,6 +19,7 @@ export default function Yard3DPage() {
   const navigate = useNavigate();
   const [attrs, setAttrs] = useState<HouseAttrs>(loadAttrs);
   const [open, setOpen] = useState(true);
+  const [illustration, setIllustration] = useState(true); // prototype: default to the new NPR look
   const update = (patch: Partial<HouseAttrs>) => setAttrs(prev => {
     const next = { ...prev, ...patch };
     try { localStorage.setItem('diyHouseAttributes', JSON.stringify(next)); } catch { /* ignore */ }
@@ -28,8 +29,19 @@ export default function Yard3DPage() {
   const chip = (active: boolean): React.CSSProperties => ({ fontFamily: IT, fontSize: '0.74rem', fontWeight: 500, padding: '5px 10px', borderRadius: 999, cursor: 'pointer', border: '1.5px solid ' + (active ? '#2A2A26' : 'rgba(42,42,38,0.15)'), background: active ? '#2A2A26' : 'white', color: active ? '#efe9db' : '#2A2A26' });
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: '#EEF0E9' }}>
-      <Yard3D houseAttrs={attrs} />
+    <div style={{ position: 'fixed', inset: 0, background: illustration ? '#f6f1e6' : '#EEF0E9' }}>
+      <Yard3D houseAttrs={attrs} illustration={illustration} />
+
+      {/* Style toggle: Realistic vs Illustration (NPR prototype) */}
+      <div style={{ position: 'absolute', bottom: 24, left: '50%', transform: 'translateX(-50%)', display: 'flex', gap: 4, background: 'rgba(255,255,255,0.95)', borderRadius: 999, padding: 4, boxShadow: '0 4px 18px rgba(0,0,0,0.16)' }}>
+        {([['Illustration', true], ['Realistic', false]] as const).map(([label, val]) => (
+          <button key={label} onClick={() => setIllustration(val)}
+            style={{ fontFamily: IT, fontSize: '0.8rem', fontWeight: 600, padding: '8px 18px', borderRadius: 999, cursor: 'pointer', border: 'none',
+              background: illustration === val ? '#2A2A26' : 'transparent', color: illustration === val ? '#efe9db' : '#2A2A26' }}>
+            {label}
+          </button>
+        ))}
+      </div>
 
       <div style={{ position: 'absolute', top: 20, left: 0, right: 0, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
         <div style={{ background: 'rgba(42,42,38,0.85)', color: '#efe9db', fontFamily: IT, fontSize: '0.82rem', fontWeight: 500, padding: '8px 18px', borderRadius: 18, boxShadow: '0 4px 16px rgba(0,0,0,0.2)' }}>

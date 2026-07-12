@@ -39,3 +39,6 @@ temp/
 .cache/
 coverage/
 *.tsbuildinfo
+
+# Local agent/tooling config
+.claude/

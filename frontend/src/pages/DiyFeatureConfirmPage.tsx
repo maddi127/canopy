@@ -1,6 +1,5 @@
 import { useState, useRef, useMemo, useCallback, useEffect, Fragment } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useSaveAndExit } from '../hooks/useSaveAndExit';
 import { GoogleMap, useJsApiLoader, Polygon as GPolygon, Polyline as GPolyline, Marker as GMarker } from '@react-google-maps/api';
 import * as turf from '@turf/turf';
 import Logo from '../components/Logo';
@@ -53,7 +52,6 @@ const TREE_HEIGHTS = [
 
 export default function DiyFeatureConfirmPage() {
   const navigate = useNavigate();
-  const saveAndExit = useSaveAndExit();
   const mapRef   = useRef<google.maps.Map | null>(null);
   const { isLoaded } = useJsApiLoader({ id: 'google-map-script', googleMapsApiKey: GOOGLE_MAPS_KEY });
 
@@ -557,10 +555,6 @@ export default function DiyFeatureConfirmPage() {
     <div className="h-screen flex flex-col" style={{ backgroundColor: '#efe9db', overflow: 'hidden' }}>
       <div className="flex items-center justify-between px-10 py-4 flex-shrink-0">
         <Logo />
-        <button onClick={saveAndExit}
-          style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-          Save & exit ↗
-        </button>
       </div>
 
       <div className="flex flex-1 overflow-hidden px-10 pb-16 gap-5">

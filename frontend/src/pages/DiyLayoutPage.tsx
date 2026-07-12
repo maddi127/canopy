@@ -1,6 +1,5 @@
 import { useState, useRef, useMemo, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useSaveAndExit } from '../hooks/useSaveAndExit';
 import { GoogleMap, useJsApiLoader, Polygon, Polyline } from '@react-google-maps/api';
 import * as turf from '@turf/turf';
 import Logo from '../components/Logo';
@@ -87,7 +86,6 @@ function translatePolygon(lngLat: [number, number][], toLng: number, toLat: numb
 
 export default function DiyLayoutPage() {
   const navigate = useNavigate();
-  const saveAndExit = useSaveAndExit();
   const mapRef   = useRef<google.maps.Map | null>(null);
   const [mapReady, setMapReady] = useState(false);
 
@@ -255,10 +253,6 @@ export default function DiyLayoutPage() {
 
       <div className="flex items-center justify-between px-10 py-4 flex-shrink-0">
         <Logo />
-        <button onClick={saveAndExit}
-          style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-          Save & exit ↗
-        </button>
       </div>
 
       <div className="flex flex-1 overflow-hidden px-10 pb-10 gap-5">

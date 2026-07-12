@@ -28,60 +28,39 @@ export default function AddressPage() {
   );
 
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        backgroundColor: BG,
-        fontFamily: IT,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '24px',
-      }}
-    >
-      <Link to="/" style={{ marginBottom: '40px' }}>
-        <Logo />
-      </Link>
-
-      <h1
-        style={{
-          fontFamily: IS,
-          fontSize: 'clamp(2.2rem, 4vw, 3.2rem)',
-          color: DARK,
-          lineHeight: 1.1,
-          fontWeight: 400,
-          textAlign: 'center',
-          margin: '0 0 28px',
-        }}
-      >
-        Where are we planting?
-      </h1>
-
-      <div
-        className="hero-address-wrapper"
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          backgroundColor: 'white',
-          borderRadius: '100px',
-          padding: '6px 6px 6px 18px',
-          boxShadow: '0 4px 28px rgba(26,26,22,0.13)',
-          width: '100%',
-          maxWidth: '460px',
-        }}
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0, marginRight: '8px' }}>
-          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="#9a9485" />
-        </svg>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <AddressInput onAddressSelect={handleAddressSelect} />
-        </div>
+    <div className="min-h-screen flex flex-col pt-8" style={{ backgroundColor: BG, fontFamily: IT }}>
+      {/* Header — matches the preferences flow (logo top-left) */}
+      <div className="flex items-center px-10">
+        <Link to="/"><Logo /></Link>
       </div>
 
-      <p style={{ fontFamily: IT, fontSize: '0.85rem', color: '#8a8a7a', marginTop: '16px' }}>
-        Select your address to continue.
-      </p>
+      {/* Title — same serif scale + spacing as the preferences pages */}
+      <h1 style={{ fontFamily: IS, fontSize: '4rem', color: DARK, lineHeight: 1.05, fontWeight: 400, marginTop: '1.33rem', marginBottom: '1.6rem', paddingLeft: '2.5rem' }}>
+        Enter your home address to start designing
+      </h1>
+
+      <div style={{ paddingLeft: '2.5rem', paddingRight: '2.5rem', maxWidth: '560px' }}>
+        <div
+          className="hero-address-wrapper"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            backgroundColor: 'white',
+            borderRadius: '100px',
+            padding: '6px 6px 6px 18px',
+            boxShadow: '0 4px 28px rgba(26,26,22,0.13)',
+            width: '100%',
+            maxWidth: '460px',
+          }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0, marginRight: '8px' }}>
+            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="#9a9485" />
+          </svg>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <AddressInput onAddressSelect={handleAddressSelect} placeholder=" " />
+          </div>
+        </div>
+      </div>
 
       <style>{`
         .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder {

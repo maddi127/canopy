@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useSaveAndExit } from '../hooks/useSaveAndExit';
 import Logo from '../components/Logo';
 import { generateFinalPlanImage } from '../services/geminiService';
 import { PLANTS } from '../features/planting/plantDatabase';
@@ -34,7 +33,6 @@ async function compressImage(dataUrl: string, maxDim = 1400, quality = 0.88): Pr
 
 export default function DiyFinalRenderPage() {
   const navigate  = useNavigate();
-  const saveAndExit = useSaveAndExit();
   const started   = useRef(false);
 
   const [image,   setImage]   = useState<string | null>(null);
@@ -120,10 +118,6 @@ export default function DiyFinalRenderPage() {
 
       <div className="flex items-center justify-between px-10 py-4 flex-shrink-0">
         <Logo />
-        <button onClick={saveAndExit}
-          style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-          Save & exit ↗
-        </button>
       </div>
 
       <div className="px-10 mt-8 mb-5 flex-shrink-0">

@@ -79,14 +79,14 @@ export interface ConceptFeature {
   zoneType: PlanZoneType;
   count: number;
   position: ConceptPosition;
-  shape?: import('../services/zoneRulesUnified').ShapeCharacter;
+  shape?: string;
   /**
    * Category of this feature — present when the feature exists in the original yard photo.
    * infrastructure = preserve unconditionally (trees, fences, house, driveways, etc.)
    * redesign_candidate = replace per user selection (seating, dining, lawn, beds, etc.)
    * undefined = newly added by the concept design (not in the original photo)
    */
-  featureCategory?: import('../services/zoneRulesUnified').FeatureCategory;
+  featureCategory?: string;
   rawObservation?: string;
 }
 
@@ -167,7 +167,7 @@ export interface ZoneRequest {
   /** Coarse placement preference derived from the concept image. Strong but not a hard constraint. */
   preferredPosition?: ConceptPosition;
   /** Shape character observed in the concept image. Proposer prefers this over style defaults. */
-  conceptShape?: import('../services/zoneRulesUnified').ShapeCharacter;
+  conceptShape?: string;
 }
 
 // ── Phase 3: proposed zones ───────────────────────────────────────────────────

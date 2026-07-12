@@ -1,4 +1,5 @@
 import { useRef, useEffect, useLayoutEffect } from 'react';
+import { sketchStroke, sketchRing, scallopPath, graphGrid, hatchPattern } from '../lib/sketch';
 // Draw before paint so the static base never flashes blank on mount (avoids a jump at the hand-off).
 const useIsoLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
@@ -33,7 +34,7 @@ const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 function shade(hex: string, f: number) { const n = parseInt(hex.slice(1), 16); const c = (v: number) => Math.max(0, Math.min(255, Math.round(v * f))); return `rgb(${c((n >> 16) & 255)},${c((n >> 8) & 255)},${c(n & 255)})`; }
 
 type Affine = { a: number; b: number; c: number; d: number; e: number; f: number };
-export default function IllustrativeSite({ width, height, animate = true, durationMs = 2600, onComplete, transform, startTransform, finishOrientation, bare = false }: { width: number; height: number; animate?: boolean; durationMs?: number; onComplete?: () => void; transform?: Affine; startTransform?: Affine; finishOrientation?: { yardType?: string; holdMs?: number; rotateMs?: number }; bare?: boolean }) {
+export default function IllustrativeSite({ width, height, animate = true, durationMs = 2600, onComplete, transform, startTransform, finishOrientation, bare = false, elevation = false }: { width: number; height: number; animate?: boolean; durationMs?: number; onComplete?: () => void; transform?: Affine; startTransform?: Affine; finishOrientation?: { yardType?: string; holdMs?: number; rotateMs?: number }; bare?: boolean; elevation?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const doneRef = useRef(false);
 
@@ -138,8 +139,12 @@ export default function IllustrativeSite({ width, height, animate = true, durati
     // House: paper fill, bold sketchy outline, diagonal pencil hatch so it reads as a building.
     const house = (h: { ring: Ring; c: [number, number] }, alpha: number, seed: number) => {
       const pts = toPxRing(h.ring);
-      wash(pts, '#efe9dd', alpha, seed, 'rgba(60,52,40,0.8)', 2.1);
+      // Paper fill + graphite hatch stay; the outline gets the crisp wobbly-ink treatment.
+      wash(pts, '#efe9dd', alpha, seed, 'rgba(0,0,0,0)', 0, true);
       hatchShape(pts, 'rgba(74,64,50,0.28)', 9, 1.1, seed, alpha * 0.6);
+      ctx.save(); ctx.globalAlpha = alpha;
+      sketchRing(ctx, pts, { seed: seed + 61, color: '#3c3428', width: 2.1, wobble: 1.1, passes: 2, alpha: 0.85 });
+      ctx.restore();
     };
     // Boundary: sketchy double ink line, traced up to fraction f of its perimeter.
     const tracedBoundary = (f: number) => {
@@ -150,12 +155,12 @@ export default function IllustrativeSite({ width, height, animate = true, durati
         if (acc + segs[i] <= target) { poly.push(pts[i + 1]); acc += segs[i]; }
         else { const t = (target - acc) / segs[i]; poly.push([pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t]); break; }
       }
-      const pass = (jit: number, seed: number, col: string, w: number, al: number) => {
-        const rr = rng(seed); const j = () => (rr() * 2 - 1) * jit;
-        ctx.beginPath(); poly.forEach((pt, i) => { const x = pt[0] + j(), y = pt[1] + j(); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
-        ctx.strokeStyle = col; ctx.lineWidth = w; ctx.globalAlpha = al; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke();
-      };
-      ctx.save(); pass(1.3, 31, '#6f6552', 2.3, 0.85); pass(2.3, 47, '#8a7f68', 1.4, 0.4); ctx.restore();
+      // Wobbly pressure-varied ink line, closed once the full perimeter has traced.
+      const done = f >= 0.999;
+      ctx.save();
+      sketchStroke(ctx, poly, { seed: 31, color: '#6f6552', width: 2.3, wobble: 1.2, passes: 2, alpha: 0.72, overshoot: done ? 0 : 3, closed: done });
+      sketchStroke(ctx, poly, { seed: 47, color: '#8a7f68', width: 1.3, wobble: 2.1, passes: 1, alpha: 0.4, overshoot: done ? 0 : 3, closed: done });
+      ctx.restore();
     };
     const labelText = (text: string, c: [number, number], alpha: number, seed: number) => {
       const [cx, cy] = px(c[0], c[1]); const rr = rng(seed); const rot = (rr() * 2 - 1) * 0.035;
@@ -168,34 +173,143 @@ export default function IllustrativeSite({ width, height, animate = true, durati
     // translucent fill so anything beneath stays visible, plus scribbled foliage texture.
     const tree = (t: { x: number; y: number; rad: number }, grow: number, seed: number) => {
       const [cx, cy] = px(t.x, t.y); const R = Math.max(8, t.rad * scaleOf()) * grow;
-      const rr = rng(seed); const N = 11; const ring: [number, number][] = [];
-      for (let i = 0; i < N; i++) { const a = (i / N) * Math.PI * 2, rad = R * (0.8 + rr() * 0.34); ring.push([cx + Math.cos(a) * rad, cy + Math.sin(a) * rad]); }
       const green = '#7fa15f';
-      ctx.save(); ctx.translate(R * 0.1, R * 0.14); roughPath(ring, 1.5, seed + 1); ctx.globalAlpha = 0.08; ctx.fillStyle = '#384028'; ctx.fill(); ctx.restore();
-      ctx.save(); ctx.globalAlpha = 0.4; roughPath(ring, 1.4, seed + 2); ctx.fillStyle = green; ctx.fill(); ctx.restore();
-      ctx.save(); ctx.globalAlpha = 0.15; roughPath(ring, 2.7, seed + 5); ctx.fillStyle = shade(green, 0.8); ctx.fill(); ctx.restore();
-      ctx.save(); roughPath(ring, 1.2, seed + 7); ctx.globalAlpha = 0.5; ctx.strokeStyle = 'rgba(55,75,42,0.6)'; ctx.lineWidth = 1.4; ctx.lineJoin = 'round'; ctx.stroke(); ctx.restore();
-      ctx.save(); ctx.globalAlpha = 0.32; ctx.strokeStyle = 'rgba(60,85,48,0.55)'; ctx.lineWidth = 1; ctx.lineCap = 'round';
-      for (let i = 0; i < 7; i++) { const a = rr() * Math.PI * 2, d = rr() * R * 0.45, bx = cx + Math.cos(a) * d, by = cy + Math.sin(a) * d, br = R * (0.18 + rr() * 0.22); ctx.beginPath(); ctx.arc(bx, by, br, a, a + 1.6 + rr()); ctx.stroke(); }
+      // Scalloped cloud canopy (translucent, so anything beneath stays visible).
+      const canopy = scallopPath(cx, cy, R, { seed });
+      ctx.save(); ctx.translate(R * 0.1, R * 0.14); ctx.globalAlpha = 0.08; ctx.fillStyle = '#384028'; ctx.fill(canopy); ctx.restore();
+      ctx.save(); ctx.globalAlpha = 0.4; ctx.fillStyle = green; ctx.fill(canopy); ctx.restore();
+      ctx.save(); ctx.globalAlpha = 0.15; ctx.fillStyle = shade(green, 0.8); ctx.fill(scallopPath(cx - R * 0.14, cy - R * 0.14, R * 0.66, { seed: seed + 5 })); ctx.restore();
+      ctx.save(); ctx.globalAlpha = 0.55; ctx.lineWidth = 1.4; ctx.lineJoin = 'round'; ctx.strokeStyle = 'rgba(55,75,42,0.7)'; ctx.stroke(canopy); ctx.restore();
+      // 2–3 interior branch squiggles radiating from the centre.
+      const rr = rng(seed + 13);
+      const nb = 2 + Math.round(rr());
+      for (let i = 0; i < nb; i++) {
+        const a = rr() * Math.PI * 2, len = R * (0.4 + rr() * 0.3), bend = (rr() * 2 - 1) * len * 0.22;
+        const ex = cx + Math.cos(a) * len, ey = cy + Math.sin(a) * len;
+        const mx = cx + Math.cos(a) * len * 0.5 - Math.sin(a) * bend, my = cy + Math.sin(a) * len * 0.5 + Math.cos(a) * bend;
+        sketchStroke(ctx, [[cx, cy], [mx, my], [ex, ey]], { seed: seed + i * 29 + 3, color: 'rgba(70,90,50,0.5)', width: 1.1, wobble: 0.7, passes: 1, overshoot: 0 });
+      }
+    };
+
+    // ── Elevation ("illustration view") primitives — the plan is tilted (squashed y) upstream via
+    // the transform; heights are drawn as pure screen-up offsets at the ground plane's x-scale. ──
+    const doorPt: [number, number] | null = Array.isArray(bf.doorPoint) && bf.doorPoint.length === 2 ? cs(bf.doorPoint[0], bf.doorPoint[1]) : null;
+    const houseElev = (h: { ring: Ring; c: [number, number] }, seed: number) => {
+      const g = toPxRing(h.ring);
+      const s = scaleOf();
+      const wallH = 9 * s;
+      const t = g.map(([x, y]) => [x, y - wallH]) as [number, number][];
+      let cgx = 0, cgy = 0; for (const [x, y] of g) { cgx += x; cgy += y; } cgx /= g.length; cgy /= g.length;
+      // Ground shadow so the building sits on the page.
+      ctx.save(); ctx.translate(3, 4); roughPath(g, 1.2, seed + 1); ctx.globalAlpha = 0.12; ctx.fillStyle = '#3a352a'; ctx.fill(); ctx.restore();
+      // Viewer-facing walls (edges on the lower half of the footprint), lit from the left.
+      const visible: { g0: [number, number]; g1: [number, number]; t0: [number, number]; t1: [number, number]; mid: number }[] = [];
+      for (let i = 0; i < g.length; i++) {
+        const j = (i + 1) % g.length;
+        const my = (g[i][1] + g[j][1]) / 2;
+        if (my >= cgy - 0.5) visible.push({ g0: g[i], g1: g[j], t0: t[i], t1: t[j], mid: my });
+      }
+      visible.sort((a, b) => a.mid - b.mid); // farther walls first
+      for (const wq of visible) {
+        const pts: [number, number][] = [wq.g0, wq.g1, wq.t1, wq.t0];
+        const lean = wq.g1[0] - wq.g0[0]; // west-ish faces slightly darker
+        ctx.save(); roughPath(pts, 0.9, seed + Math.round(wq.g0[0])); ctx.globalAlpha = 0.96; ctx.fillStyle = lean >= 0 ? '#F2EDE1' : '#E4DECF'; ctx.fill();
+        ctx.globalAlpha = 0.75; ctx.strokeStyle = 'rgba(60,52,40,0.75)'; ctx.lineWidth = 1.6; ctx.lineJoin = 'round'; ctx.stroke(); ctx.restore();
+        // Facade details: door on the wall nearest the marked entry, windows on long walls.
+        const wlen = Math.hypot(wq.g1[0] - wq.g0[0], wq.g1[1] - wq.g0[1]);
+        const ux = (wq.g1[0] - wq.g0[0]) / (wlen || 1), uy = (wq.g1[1] - wq.g0[1]) / (wlen || 1);
+        const rect = (fr: number, wFt: number, hFt: number, baseLift: number, fill: string) => {
+          const w2 = (wFt * s) / 2, hh = hFt * s;
+          const bx = wq.g0[0] + ux * wlen * fr, by = wq.g0[1] + uy * wlen * fr - baseLift * s;
+          const p2: [number, number][] = [[bx - ux * w2, by - uy * w2], [bx + ux * w2, by + uy * w2], [bx + ux * w2, by + uy * w2 - hh], [bx - ux * w2, by - uy * w2 - hh]];
+          ctx.save(); roughPath(p2, 0.6, seed + Math.round(bx)); ctx.globalAlpha = 0.95; ctx.fillStyle = fill; ctx.fill();
+          ctx.globalAlpha = 0.6; ctx.strokeStyle = 'rgba(60,52,40,0.7)'; ctx.lineWidth = 1.1; ctx.stroke(); ctx.restore();
+        };
+        let doorFr = -1;
+        if (doorPt) {
+          const dpx = px(doorPt[0], doorPt[1]);
+          const vx = dpx[0] - wq.g0[0], vy = dpx[1] - wq.g0[1];
+          const along = (vx * ux + vy * uy) / (wlen || 1);
+          const perp = Math.abs(vx * -uy + vy * ux);
+          if (along > 0.05 && along < 0.95 && perp < 14) { doorFr = along; rect(along, 3.4, 7, 0, '#8A6F52'); }
+        }
+        if (wlen > 14 * s) {
+          for (const fr of [0.26, 0.74]) {
+            if (doorFr > 0 && Math.abs(fr - doorFr) < 0.18) continue;
+            rect(fr, 3, 3.2, 3.4, '#CBD6D0');
+          }
+        }
+      }
+      // Roof: the footprint raised by the wall height — washed, hatched, inked.
+      wash(t, '#DCD5C3', 1, seed + 4, 'rgba(60,52,40,0.8)', 2);
+      hatchShape(t, 'rgba(74,64,50,0.25)', 9, 1.1, seed + 6, 0.55);
+    };
+    const treeElev = (tr: { x: number; y: number; rad: number }, seed: number) => {
+      const [bx, by] = px(tr.x, tr.y);
+      const s = scaleOf();
+      const R = Math.max(9, tr.rad * s);
+      const trunkH = R * 1.35;
+      // Ground shadow (squashed ellipse).
+      ctx.save(); ctx.globalAlpha = 0.1; ctx.beginPath(); ctx.ellipse(bx + R * 0.12, by + R * 0.08, R * 0.85, R * 0.32, 0, 0, Math.PI * 2); ctx.fillStyle = '#33402a'; ctx.fill(); ctx.restore();
+      // Trunk.
+      ctx.save(); ctx.strokeStyle = '#7A5B3E'; ctx.lineCap = 'round'; ctx.lineWidth = Math.max(2, R * 0.14);
+      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + R * 0.05, by - trunkH); ctx.stroke(); ctx.restore();
+      // Canopy — same loose wobbly style as the plan trees, raised to the top of the trunk.
+      const cy2 = by - trunkH - R * 0.35;
+      const rr2 = rng(seed); const N = 11; const ring: [number, number][] = [];
+      for (let i = 0; i < N; i++) { const a = (i / N) * Math.PI * 2, rad = R * (0.82 + rr2() * 0.32); ring.push([bx + Math.cos(a) * rad, cy2 + Math.sin(a) * rad * 0.92]); }
+      const green = '#8AA968';
+      ctx.save(); ctx.globalAlpha = 0.9; roughPath(ring, 1.4, seed + 2); ctx.fillStyle = green; ctx.fill(); ctx.restore();
+      ctx.save(); ctx.globalAlpha = 0.5; roughPath(ring.map(([x, y]) => [x - R * 0.18, y - R * 0.18]) as [number, number][], 2.2, seed + 5); ctx.fillStyle = '#B4CC8F'; ctx.fill(); ctx.restore();
+      ctx.save(); roughPath(ring, 1.2, seed + 7); ctx.globalAlpha = 0.6; ctx.strokeStyle = 'rgba(55,75,42,0.65)'; ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.stroke(); ctx.restore();
+      ctx.save(); ctx.globalAlpha = 0.3; ctx.strokeStyle = 'rgba(60,85,48,0.55)'; ctx.lineWidth = 1; ctx.lineCap = 'round';
+      for (let i = 0; i < 6; i++) { const a = rr2() * Math.PI * 2, d = rr2() * R * 0.4; ctx.beginPath(); ctx.arc(bx + Math.cos(a) * d, cy2 + Math.sin(a) * d, R * (0.16 + rr2() * 0.2), a, a + 1.5 + rr2()); ctx.stroke(); }
       ctx.restore();
     };
 
     const drawAt = (p: number) => {
       ctx.clearRect(0, 0, width, height);
+      // Faint drafting graph grid, under everything (over the paper), aligned to the
+      // feet transform so it rotates with the plan — heavier every 25 ft.
+      graphGrid(ctx, width, height, scaleOf(), { origin: px(0, 0), angle: Math.atan2(curM.b, curM.a) });
       const bPts = toPxRing(boundaryFt);
       const groundA = clamp01((p - 0.05) / 0.3);
       // `bare` (auto-layout, on graph paper): skip the lot ground fill, inner shadow and boundary
       // outline so the grid shows through — only the house, hardscape and trees are drawn.
       if (!bare && groundA > 0) {
         ctx.save(); roughPath(bPts, 1.0, 2); ctx.globalAlpha = groundA; ctx.fillStyle = '#E7E1CE'; ctx.fill(); ctx.restore();
+        // Drawn-earth texture: a light mulch/soil fleck tile so the base ground reads as hand-drawn
+        // paper-with-tooth rather than a flat vector fill.
+        ctx.save(); roughPath(bPts, 1.0, 2); ctx.clip();
+        const gp = ctx.createPattern(hatchPattern('#c7b48f', 'mulch', 2), 'repeat');
+        if (gp) { ctx.globalAlpha = groundA * 0.32; ctx.fillStyle = gp; ctx.fillRect(0, 0, width, height); }
+        ctx.restore();
         // soft inner shadow → the lot reads as a contained board, distinct from the matte outside.
         ctx.save(); roughPath(bPts, 1.0, 2); ctx.clip(); roughPath(bPts, 1.0, 2);
         ctx.globalAlpha = groundA; ctx.strokeStyle = 'rgba(120,108,86,0.16)'; ctx.lineWidth = 16; ctx.stroke(); ctx.restore();
       }
       tracedBoundary(clamp01(p / 0.32));
+      if (elevation) {
+        // Illustration view: flat paving first, then houses + trees as STANDING objects, painted
+        // back-to-front by their base position so nearer things overlap farther ones correctly.
+        builds.forEach((b, i) => { const bp = toPxRing(b.ring); wash(bp, b.color, 1, i * 53 + 13, 'rgba(86,80,66,0.5)', 1.2); hatchShape(bp, 'rgba(78,72,60,0.24)', 10, 1.1, i * 53 + 20, 0.55, true); });
+        builds.forEach((b, i) => labelText(b.label, b.c, 1, i * 23 + 5));
+        const standing: { baseY: number; draw: () => void }[] = [
+          ...houses.map((h, i) => ({ baseY: Math.max(...toPxRing(h.ring).map(pt => pt[1])), draw: () => houseElev(h, i * 131 + 9) })),
+          ...trees.map((t, i) => ({ baseY: px(t.x, t.y)[1], draw: () => treeElev(t, i * 911 + 7) })),
+        ];
+        standing.sort((a, b) => a.baseY - b.baseY);
+        standing.forEach(s => s.draw());
+        return;
+      }
       const featA = clamp01((p - 0.34) / 0.24);
       if (featA > 0) {
-        builds.forEach((b, i) => { const bp = toPxRing(b.ring); wash(bp, b.color, featA, i * 53 + 13, 'rgba(86,80,66,0.5)', 1.2); hatchShape(bp, 'rgba(78,72,60,0.24)', 10, 1.1, i * 53 + 20, featA * 0.55, true); });
+        builds.forEach((b, i) => {
+          const bp = toPxRing(b.ring);
+          wash(bp, b.color, featA, i * 53 + 13, 'rgba(0,0,0,0)', 0);
+          hatchShape(bp, 'rgba(78,72,60,0.24)', 10, 1.1, i * 53 + 20, featA * 0.55, true);
+          ctx.save(); ctx.globalAlpha = featA; sketchRing(ctx, bp, { seed: i * 53 + 71, color: '#565042', width: 1.4, wobble: 1.0, passes: 2, alpha: 0.8 }); ctx.restore();
+        });
         houses.forEach((h, i) => house(h, featA, i * 131 + 9));
         const labA = clamp01((p - 0.5) / 0.2);
         if (labA > 0) { houses.forEach((h, i) => labelText(h.label, h.c, labA, i * 7 + 3)); builds.forEach((b, i) => labelText(b.label, b.c, labA, i * 23 + 5)); }
@@ -258,7 +372,7 @@ export default function IllustrativeSite({ width, height, animate = true, durati
     };
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [width, height, animate, durationMs, transform?.a, transform?.b, transform?.c, transform?.d, transform?.e, transform?.f, startTransform?.a, startTransform?.b, startTransform?.e, startTransform?.f, finishOrientation?.yardType, finishOrientation?.holdMs, finishOrientation?.rotateMs, bare]);
+  }, [width, height, animate, durationMs, transform?.a, transform?.b, transform?.c, transform?.d, transform?.e, transform?.f, startTransform?.a, startTransform?.b, startTransform?.e, startTransform?.f, finishOrientation?.yardType, finishOrientation?.holdMs, finishOrientation?.rotateMs, bare, elevation]);
 
   return <canvas ref={canvasRef} style={{ width, height, display: 'block' }} />;
 }

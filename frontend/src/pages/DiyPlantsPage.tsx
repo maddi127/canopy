@@ -354,9 +354,6 @@ export default function DiyPlantsPage() {
       {/* Header */}
       <div className="flex items-start justify-between px-10" style={{ paddingTop: '2rem' }}>
         <Logo />
-        <button onClick={() => navigate('/diy/review')} style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-          Save & exit ↗
-        </button>
       </div>
 
       {/* Title */}

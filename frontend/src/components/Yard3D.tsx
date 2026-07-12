@@ -1,7 +1,36 @@
-import { useMemo } from 'react';
-import { Canvas } from '@react-three/fiber';
+import { useEffect, useMemo } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
+import { IllustrationEffects } from './IllustrationEffects';
+import { Plant } from './Plant3D';
+import { ZoneProxy } from './Furnishings3D';
+import { getStreetViewInsights } from '../services/streetViewService';
+
+// Warm off-white "paper" tone used for the iso background when illustration mode is on
+// (see (B) PAPER BACKGROUND in the illustration-mode prototype).
+const PAPER_BG = '#f6f1e6';
+const INK_LINE = '#3a3630';
+
+// Exposes a capture fn (fresh render → PNG data URL) to the parent via a ref.
+function CaptureBridge({ exportRef }: { exportRef: React.MutableRefObject<(() => string | null) | null> }) {
+  const { gl, scene, camera } = useThree();
+  useEffect(() => {
+    exportRef.current = () => {
+      // Reveal the capture-only label layer for exactly one render, then hide it again so the live
+      // on-screen 3D never shows labels. Purely imperative on the THREE objects — no React state.
+      const labels = scene.getObjectByName('capture-labels');
+      try {
+        if (labels) labels.visible = true;
+        gl.render(scene, camera);
+        return gl.domElement.toDataURL('image/png');
+      } catch { return null; }
+      finally { if (labels) labels.visible = false; }
+    };
+    return () => { exportRef.current = null; };
+  }, [exportRef, gl, scene, camera]);
+  return null;
+}
 
 // ── Data (read from the same localStorage the 2D flow writes) ──────────────────────
 type Ring = [number, number][];
@@ -75,110 +104,12 @@ function buildCS(verts: [number, number][]) {
 function ringArea(r: Ring) { let a = 0; for (let i = 0; i < r.length; i++) { const j = (i + 1) % r.length; a += r[i][0] * r[j][1] - r[j][0] * r[i][1]; } return Math.abs(a / 2); }
 function centroid(r: Ring): [number, number] { let x = 0, y = 0; for (const [px, py] of r) { x += px; y += py; } return [x / r.length, y / r.length]; }
 
-// Map the database's descriptive colour (foliage or bloom) to a hex tint.
-const COLOR_HEX: Record<string, string> = {
-  'green': '#5f8a4e', 'dark green': '#3f6b3a', 'deep green': '#3f6b3a', 'medium green': '#5f8a4e', 'light green': '#7faa5a', 'bright green': '#6fa348', 'emerald': '#3f8a55',
-  'blue-green': '#5e8b7e', 'blue green': '#5e8b7e', 'gray-green': '#8a9a82', 'grey-green': '#8a9a82', 'gray green': '#8a9a82', 'silver': '#b7c0b0', 'silvery': '#b7c0b0', 'gray': '#9aa39a', 'grey': '#9aa39a',
-  'gold': '#c9a227', 'golden': '#c9a227', 'yellow': '#cdb53b', 'chartreuse': '#9bbf3b', 'lime': '#9bbf3b',
-  'purple': '#7a5a9e', 'violet': '#7a5a9e', 'lavender': '#9d8ec4', 'magenta': '#a85a8e',
-  'blue': '#5b86a8',
-  'pink': '#d98aa6', 'rose': '#d98aa6',
-  'white': '#e8e6dd', 'cream': '#e3dcc4',
-  'red': '#a8443a', 'crimson': '#a8443a', 'scarlet': '#a8443a',
-  'burgundy': '#6e3b3b', 'maroon': '#6e3b3b', 'deep red': '#6e3b3b',
-  'orange': '#cf7b3a', 'coral': '#d98a5a', 'apricot': '#d8a36a',
-  'bronze': '#8a6a4a', 'copper': '#9a6a44', 'variegated': '#9bb37a',
-};
-function foliageColor(raw: string, evergreen: boolean): string {
-  const k = (raw || '').toLowerCase().trim();
-  if (COLOR_HEX[k]) return COLOR_HEX[k];
-  for (const key in COLOR_HEX) if (k.includes(key)) return COLOR_HEX[key];
-  return evergreen ? '#3f6b3a' : '#5f8a4e'; // sensible green fallback
-}
 // Lighten/darken a hex by factor f (for foliage variation within a canopy).
 function shade(hex: string, f: number): string {
   const h = hex.replace('#', ''); const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
   const c = (v: number) => Math.max(0, Math.min(255, Math.round(v * f)));
   const r = c((n >> 16) & 255), g = c((n >> 8) & 255), b = c(n & 255);
   return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
-}
-
-// Deterministic per-position RNG so a plant's procedural detail is stable across renders.
-function rngFrom(x: number, y: number) {
-  let s = (Math.floor(x * 131.7) ^ Math.floor(y * 97.3)) | 0 || 1;
-  return () => { s = Math.imul(s ^ (s >>> 15), s | 1); s ^= s + Math.imul(s ^ (s >>> 7), s | 61); return ((s ^ (s >>> 14)) >>> 0) / 4294967296; };
-}
-
-// A thin oriented cylinder between two points (for stems).
-function Stem({ base, tip, thickness, color }: { base: number[]; tip: number[]; thickness: number; color: string }) {
-  const { mid, quat, len } = useMemo(() => {
-    const b = new THREE.Vector3(base[0], base[1], base[2]), t = new THREE.Vector3(tip[0], tip[1], tip[2]);
-    const dir = t.clone().sub(b); const len = dir.length() || 0.01;
-    const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
-    const m = b.clone().add(t).multiplyScalar(0.5);
-    return { mid: [m.x, m.y, m.z] as [number, number, number], quat, len };
-  }, [base, tip]);
-  return <mesh position={mid} quaternion={quat}><cylinderGeometry args={[thickness, thickness, len, 4]} /><meshStandardMaterial color={color} /></mesh>;
-}
-
-// Columbine: lacy low foliage mound + thin stems holding small nodding flowers.
-function Columbine({ p, cx, cy }: { p: PlantInstance; cx: number; cy: number }) {
-  const x = p.x - cx, z = p.y - cy;
-  const r = Math.max(0.4, p.widthFt / 2), h = Math.max(0.9, p.heightFt * 1.35);
-  const base = foliageColor(p.color, false);
-  const flower = (base === '#5f8a4e' || base === '#3f6b3a') ? '#c14b54' : base; // columbine flowers aren't green
-  const stems = useMemo(() => {
-    const rand = rngFrom(p.x, p.y), arr: { base: number[]; tip: number[] }[] = [];
-    const n = Math.max(5, Math.min(9, Math.round(r * 12)));
-    for (let i = 0; i < n; i++) {
-      const ang = rand() * Math.PI * 2, reach = r * (0.25 + rand() * 0.7), sh = h * (0.55 + rand() * 0.45);
-      arr.push({ base: [(rand() - 0.5) * r * 0.3, 0.12, (rand() - 0.5) * r * 0.3], tip: [Math.cos(ang) * reach, sh, Math.sin(ang) * reach] });
-    }
-    return arr;
-  }, [p.x, p.y, r, h]);
-  const fr = Math.min(0.1, r * 0.22);
-  return (
-    <group position={[x, 0, z]}>
-      {[0, 1, 2, 3].map(i => <mesh key={i} position={[(i - 1.5) * r * 0.32, 0.15, ((i % 2) - 0.5) * r * 0.45]} scale={[1, 0.45, 1]}><icosahedronGeometry args={[r * 0.5, 1]} /><meshStandardMaterial color="#5f8a4e" flatShading /></mesh>)}
-      {stems.map((s, i) => (
-        <group key={i}>
-          <Stem base={s.base} tip={s.tip} thickness={0.022} color="#6a4a3a" />
-          <mesh position={[s.tip[0], s.tip[1], s.tip[2]]}><sphereGeometry args={[fr, 7, 6]} /><meshStandardMaterial color={flower} flatShading /></mesh>
-          <mesh position={[s.tip[0], s.tip[1] - fr, s.tip[2]]} rotation={[Math.PI, 0, 0]}><coneGeometry args={[fr * 0.85, fr * 1.5, 6]} /><meshStandardMaterial color={flower} flatShading /></mesh>
-          <mesh position={[s.tip[0], s.tip[1] + fr * 0.3, s.tip[2]]}><sphereGeometry args={[fr * 0.4, 5, 4]} /><meshStandardMaterial color="#e0c24a" flatShading /></mesh>
-        </group>
-      ))}
-    </group>
-  );
-}
-
-// Flowering shrub: irregular foliage mound dusted/clustered/spiked with flowers.
-// mode: 'clusters' (lilac panicles), 'dust' (bluebeard haze), 'spikes' (fernbush plumes).
-function Shrub({ p, cx, cy, foliage, flower, mode }: { p: PlantInstance; cx: number; cy: number; foliage: string; flower: string; mode: 'clusters' | 'dust' | 'spikes' }) {
-  const x = p.x - cx, z = p.y - cy;
-  const r = Math.max(0.5, p.widthFt / 2), h = Math.max(0.6, p.heightFt);
-  const mound = useMemo(() => {
-    const rnd = rngFrom(p.x + 7, p.y + 3); const arr: { pos: [number, number, number]; rad: number }[] = [];
-    for (let i = 0; i < 5; i++) arr.push({ pos: [(rnd() - 0.5) * r * 0.8, h * (0.3 + rnd() * 0.35), (rnd() - 0.5) * r * 0.8], rad: r * (0.5 + rnd() * 0.32) });
-    return arr;
-  }, [p.x, p.y, r, h]);
-  const flowers = useMemo(() => {
-    const rnd = rngFrom(p.x, p.y); const arr: [number, number, number][] = [];
-    const count = mode === 'dust' ? 18 : mode === 'clusters' ? 15 : 9;
-    for (let i = 0; i < count; i++) {
-      const a = rnd() * Math.PI * 2, el = 0.25 + rnd() * 0.7, rad = r * (0.62 + rnd() * 0.32);
-      arr.push([Math.cos(a) * rad * (1 - el * 0.45), Math.min(h, h * (0.4 + el * 0.6)), Math.sin(a) * rad * (1 - el * 0.45)]);
-    }
-    return arr;
-  }, [p.x, p.y, r, h, mode]);
-  return (
-    <group position={[x, 0, z]}>
-      {mound.map((m, i) => <mesh key={`m${i}`} castShadow position={m.pos} scale={[1, Math.min(1, h / (r * 1.6)), 1]}><icosahedronGeometry args={[m.rad, 1]} /><meshStandardMaterial color={shade(foliage, 0.84 + (i % 3) * 0.1)} flatShading /></mesh>)}
-      {flowers.map((f, i) => mode === 'spikes'
-        ? <mesh key={`f${i}`} position={[f[0], f[1] + Math.min(0.45, h * 0.18), f[2]]}><coneGeometry args={[Math.max(0.06, r * 0.09), Math.min(0.9, h * 0.42), 5]} /><meshStandardMaterial color={flower} flatShading /></mesh>
-        : <mesh key={`f${i}`} position={f}><icosahedronGeometry args={[mode === 'clusters' ? r * 0.17 : r * 0.1, 0]} /><meshStandardMaterial color={flower} flatShading /></mesh>)}
-    </group>
-  );
 }
 
 // Existing tree → a clustered procedural canopy.
@@ -195,61 +126,14 @@ function ExistingTree({ x, z, rad }: { x: number; z: number; rad: number }) {
   );
 }
 
-// ── A single procedural plant ──────────────────────────────────────────────────────
-const SMALL_PLANT_R = 1.25; // below this, render as a low amorphous mound (merges into a mass)
-function Plant({ p, cx, cy }: { p: PlantInstance; cx: number; cy: number }) {
-  const x = p.x - cx, z = p.y - cy;
-  const r = Math.max(0.3, p.widthFt / 2), h = Math.max(0.4, p.heightFt);
-  const t = (p.type || '').toLowerCase();
-  const col = foliageColor(p.color, p.evergreen || t.includes('evergreen'));
-  const name = (p.name || '').toLowerCase();
-  // Small plants → a low, slightly-inflated mound; neighbours overlap into a continuous mass.
-  if (r < SMALL_PLANT_R) {
-    const br = Math.max(r, 1.3);
-    return <mesh castShadow position={[x, Math.min(h, br) * 0.45, z]} scale={[1, Math.min(1, h / (br * 1.4)), 1]}><icosahedronGeometry args={[br, 1]} /><meshStandardMaterial color={col} flatShading /></mesh>;
-  }
-  // Reference-matched species models (colours sampled from the user's photos).
-  if (name.includes('columbine')) return <Columbine p={p} cx={cx} cy={cy} />;
-  if (name.includes('fernbush')) return <Shrub p={p} cx={cx} cy={cy} foliage="#9aa98c" flower="#efe7d2" mode="spikes" />;
-  if (name.includes('lilac')) return <Shrub p={p} cx={cx} cy={cy} foliage="#5f7f4e" flower="#9b4f93" mode="clusters" />;
-  if (name.includes('bluebeard') || name.includes('caryopteris')) return <Shrub p={p} cx={cx} cy={cy} foliage="#6f8a5e" flower="#7a86c8" mode="dust" />;
-  const isTree = t.includes('tree') || p.layer === 'tree';
-  if (isTree) {
-    const evergreen = p.evergreen || t.includes('evergreen');
-    const trunkH = h * 0.4, canopyH = h - trunkH, cr = Math.max(r, canopyH / 2);
-    const rnd = rngFrom(p.x * 1.7 + 3, p.y * 1.3 + 5);
-    const blobs: [number, number, number, number, number][] = [];
-    const nb = evergreen ? 3 : 7;
-    for (let i = 0; i < nb; i++) blobs.push([(rnd() - 0.5) * cr, trunkH + canopyH * (0.2 + rnd() * 0.65), (rnd() - 0.5) * cr, cr * (0.48 + rnd() * 0.4), 0.8 + rnd() * 0.36]);
-    return (
-      <group position={[x, 0, z]}>
-        <mesh castShadow position={[0, trunkH / 2, 0]}><cylinderGeometry args={[Math.max(0.12, r * 0.09), Math.max(0.2, r * 0.15), trunkH, 6]} /><meshStandardMaterial color="#6b4f33" /></mesh>
-        {evergreen
-          ? blobs.map((b, i) => <mesh key={i} castShadow position={[b[0] * 0.4, b[1], b[2] * 0.4]}><coneGeometry args={[cr * (0.7 - i * 0.18), canopyH * 0.6, 9]} /><meshStandardMaterial color={shade(col, b[4])} flatShading /></mesh>)
-          : blobs.map((b, i) => <mesh key={i} castShadow position={[b[0], b[1], b[2]]}><icosahedronGeometry args={[b[3], 1]} /><meshStandardMaterial color={shade(col, b[4])} flatShading /></mesh>)}
-      </group>
-    );
-  }
-  if (t.includes('cactus') || t.includes('succulent')) {
-    return (
-      <mesh castShadow position={[x, h / 2, z]}>
-        <cylinderGeometry args={[r * 0.55, r * 0.7, h, 7]} />
-        <meshStandardMaterial color={col} flatShading />
-      </mesh>
-    );
-  }
-  // shrubs / perennials / grasses / groundcover → a mound (squashed sphere)
-  return (
-    <mesh castShadow position={[x, Math.min(h, r) / 2, z]} scale={[1, Math.min(1, h / (r * 2)), 1]}>
-      <icosahedronGeometry args={[r, 1]} />
-      <meshStandardMaterial color={col} flatShading />
-    </mesh>
-  );
-}
-
 // Build a flat (ground-plane) shape from a ring of feet, centred on (cx,cy).
 function flatShape(ring: Ring, cx: number, cy: number) {
   const s = new THREE.Shape();
+  // CANONICAL WORLD CONVENTION — the shape is built with shapeY = cy − fy, but these meshes are
+  // rotated −π/2 about X, and that rotation maps shapeY → −worldZ. Net result: ground layers
+  // RENDER at world (X, Z) = (fx − cx, fy − cy) — a pure translation of plan feet, NO mirror.
+  // Every point-placed object (plants, trees, furniture, labels, roof, camera targets) must
+  // therefore use Z = y − cy. Using cy − y mirrors it across the yard's E–W centreline.
   ring.forEach(([fx, fy], i) => { const X = fx - cx, Z = cy - fy; if (i) s.lineTo(X, Z); else s.moveTo(X, Z); });
   s.closePath();
   return s;
@@ -266,6 +150,19 @@ function Ground({ ring, cx, cy, color, y = 0, opacity = 1, kind }: { ring: Ring;
   );
 }
 
+// A feature pad with real thickness (ground view): a low extruded slab so it reads as a built
+// paver/concrete pad at eye level and can never z-fight with the lawn running beneath it.
+function ZoneSlab({ ring, cx, cy, color, kind }: { ring: Ring; cx: number; cy: number; color: string; kind?: string }) {
+  const geo = useMemo(() => new THREE.ExtrudeGeometry(flatShape(ring, cx, cy), { depth: 0.3, bevelEnabled: false }), [ring, cx, cy]);
+  const tex = useMemo(() => kind ? makeTexture(kind, color) : null, [kind, color]);
+  if (tex) { const tf = TILE_FT[kind!] || 3; tex.repeat.set(1 / tf, 1 / tf); }
+  return (
+    <mesh geometry={geo} rotation={[-Math.PI / 2, 0, 0]} receiveShadow castShadow>
+      <meshStandardMaterial color={tex ? '#ffffff' : color} map={tex || undefined} roughness={0.95} />
+    </mesh>
+  );
+}
+
 function Building({ ring, cx, cy, height, color, kind }: { ring: Ring; cx: number; cy: number; height: number; color: string; kind?: string }) {
   const geo = useMemo(() => new THREE.ExtrudeGeometry(flatShape(ring, cx, cy), { depth: height, bevelEnabled: false }), [ring, cx, cy, height]);
   const tex = useMemo(() => kind ? makeTexture(kind, color) : null, [kind, color]);
@@ -277,7 +174,139 @@ function Building({ ring, cx, cy, height, color, kind }: { ring: Ring; cx: numbe
   );
 }
 
-function Scene({ houseAttrs }: { houseAttrs?: { stories?: number; material?: string; color?: string; style?: string } }) {
+// A gradient dome (ground view only) — warm pale horizon blending up to soft blue. Big
+// inward-facing sphere so the empty void behind the yard reads as sky in the conditioning image.
+function SkyDome({ radius, illustrate }: { radius: number; illustrate?: boolean }) {
+  const tex = useMemo(() => {
+    const c = document.createElement('canvas'); c.width = 4; c.height = 256; const g = c.getContext('2d')!;
+    const grad = g.createLinearGradient(0, 0, 0, 256);
+    // Illustration: trend the whole sky toward the PAPER_BG tone so the world fades paper-ward
+    // before the IllustrationEffects vignette finishes fading the corners to paper.
+    if (illustrate) {
+      grad.addColorStop(0, '#dfe1d6'); grad.addColorStop(0.62, '#ece9dc'); grad.addColorStop(1, '#f6f1e6');
+    } else {
+      grad.addColorStop(0, '#bcd2e2'); grad.addColorStop(0.62, '#d7e2e6'); grad.addColorStop(1, '#f3e9d8');
+    }
+    g.fillStyle = grad; g.fillRect(0, 0, 4, 256);
+    const t = new THREE.CanvasTexture(c); t.needsUpdate = true; return t;
+  }, [illustrate]);
+  return (
+    <mesh>
+      <sphereGeometry args={[radius, 24, 16]} />
+      <meshBasicMaterial map={tex} side={THREE.BackSide} fog={false} depthWrite={false} />
+    </mesh>
+  );
+}
+
+// Simple hip roof (ground view only) over a house footprint. Builds a low ridge along the
+// footprint's longest edge with overhanging eaves — silhouette only; Gemini repaints it.
+function HipRoof({ ring, cx, cy, wallTop, style, roofType, roofColorHex }: { ring: Ring; cx: number; cy: number; wallTop: number; style?: string; roofType?: 'gable' | 'hip' | 'flat' | null; roofColorHex?: string | null }) {
+  // Shape precedence: an explicit Street View roofType wins over the style heuristic.
+  //   'flat' → thin parapet cap · 'hip'/'gable' → hip prism · (none) → 'modern' style ⇒ parapet.
+  const parapet = roofType ? roofType === 'flat' : style === 'modern';
+  // Colour: a validated hex from Street View overrides the default shingle tone.
+  const roofColor = (typeof roofColorHex === 'string' && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(roofColorHex)) ? roofColorHex : '#4a453e';
+  const { geo, pos } = useMemo(() => {
+    // Centre the ring on the footprint centroid, in local (X, Z) plane.
+    const [fx, fy] = centroid(ring);
+    const local = ring.map(([px, py]) => [px - fx, py - fy] as [number, number]);
+    // Longest edge → ridge axis; build an axis-aligned oriented bbox around it.
+    let bestLen = -1, ang = 0;
+    for (let i = 0; i < local.length; i++) {
+      const a = local[i], b = local[(i + 1) % local.length];
+      const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
+      if (L > bestLen) { bestLen = L; ang = Math.atan2(dy, dx); }
+    }
+    const ca = Math.cos(-ang), sa = Math.sin(-ang);
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for (const [px, py] of local) {
+      const u = px * ca - py * sa, v = px * sa + py * ca;
+      if (u < minU) minU = u; if (u > maxU) maxU = u; if (v < minV) minV = v; if (v > maxV) maxV = v;
+    }
+    const OVER = 1; // eave overhang (ft)
+    const hu = (maxU - minU) / 2 + OVER, hv = (maxV - minV) / 2 + OVER; // half-extents (U=ridge, V=slope)
+    const midU = (minU + maxU) / 2, midV = (minV + maxV) / 2;
+    const rise = parapet ? 0.5 : 6; // parapet → thin cap; else hip prism
+    // 6 verts: 4 eave corners + 2 ridge ends (ridge runs along U, inset on V), built in the
+    // UV frame around the bbox centre. WORLD CONVENTION (see flatShape): point objects sit at
+    // (x − cx, y − cy) — a pure translation of plan feet, no reflection. So UV→world is just
+    // the +ang rotation baked into the verts: (u,v) → (u·cos − v·sin, u·sin + v·cos) as (X, Z).
+    const ridgeInset = parapet ? 0 : Math.min(hv, hu) * 0.55;
+    const cA = Math.cos(ang), sA = Math.sin(ang);
+    const uv: [number, number, number][] = [
+      [-hu, 0, -hv], [hu, 0, -hv], [hu, 0, hv], [-hu, 0, hv], // eaves (y=0)
+      [-hu + ridgeInset, rise, 0], [hu - ridgeInset, rise, 0], // ridge ends (y=rise)
+    ];
+    const verts = new Float32Array(uv.flatMap(([u, y, v]) => {
+      const u2 = u + midU, v2 = v + midV;
+      return [u2 * cA - v2 * sA, y, u2 * sA + v2 * cA];
+    }));
+    const idx = [
+      0, 1, 4, 1, 5, 4, 1, 2, 5, 2, 3, 5, // long slopes + one hip end
+      2, 0, 4, 4, 5, 2, 3, 0, 4, // remaining hip triangles (double-sided material covers winding)
+    ];
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    g.setIndex(idx); g.computeVertexNormals();
+    return { geo: g, pos: [fx - cx, wallTop, fy - cy] as [number, number, number] };
+  }, [ring, cx, cy, wallTop, parapet]);
+  return (
+    <mesh geometry={geo} position={pos} castShadow receiveShadow>
+      <meshStandardMaterial color={roofColor} side={THREE.DoubleSide} flatShading />
+    </mesh>
+  );
+}
+
+// ── Capture-only text labels ────────────────────────────────────────────────────────
+// Sprites drawn on a CanvasTexture (bold white on a dark pill). They live in a group that
+// is hidden on-screen and only made visible during the capture render (see CaptureBridge),
+// so Gemini can read the object identities burned into the conditioning image. drei's <Html>
+// is a DOM overlay and would NOT appear in toDataURL — hence Sprite + CanvasTexture.
+const _labelCache = new Map<string, { texture: any; aspect: number }>();
+function labelSprite(text: string): { texture: any; aspect: number } {
+  const hit = _labelCache.get(text); if (hit) return hit;
+  const SCALE = 4, FS = 44 * SCALE, PAD = 24 * SCALE, RAD = 18 * SCALE;
+  const meas = document.createElement('canvas').getContext('2d')!;
+  meas.font = `bold ${FS}px system-ui, -apple-system, Helvetica, Arial, sans-serif`;
+  const tw = meas.measureText(text).width;
+  const w = Math.ceil(tw + PAD * 2), h = Math.ceil(FS + PAD * 1.4);
+  const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d')!;
+  // rounded dark pill
+  g.fillStyle = 'rgba(20,22,18,0.85)';
+  g.beginPath();
+  g.moveTo(RAD, 0); g.lineTo(w - RAD, 0); g.arcTo(w, 0, w, RAD, RAD);
+  g.lineTo(w, h - RAD); g.arcTo(w, h, w - RAD, h, RAD);
+  g.lineTo(RAD, h); g.arcTo(0, h, 0, h - RAD, RAD);
+  g.lineTo(0, RAD); g.arcTo(0, 0, RAD, 0, RAD);
+  g.closePath(); g.fill();
+  // bold white text
+  g.font = `bold ${FS}px system-ui, -apple-system, Helvetica, Arial, sans-serif`;
+  g.fillStyle = '#ffffff'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, w / 2, h / 2 + FS * 0.02);
+  const texture = new THREE.CanvasTexture(c); texture.anisotropy = 4; texture.needsUpdate = true;
+  const out = { texture, aspect: w / h };
+  _labelCache.set(text, out); return out;
+}
+// A billboard sprite sized in world feet (height clamped for legibility, width from text aspect).
+function CaptureLabel({ text, pos, size }: { text: string; pos: [number, number, number]; size: number }) {
+  const { texture, aspect } = useMemo(() => labelSprite(text), [text]);
+  const hFt = Math.max(2.2, size * 0.035);
+  const wFt = hFt * aspect;
+  return (
+    <sprite position={pos} scale={[wFt, hFt, 1]}>
+      <spriteMaterial map={texture} depthTest={false} depthWrite={false} transparent />
+    </sprite>
+  );
+}
+
+function Scene({ houseAttrs, ground = false, hero = false, fittedDist = 60, camDir = [0, 1], illustration = false }: { houseAttrs?: { stories?: number; material?: string; color?: string; style?: string }; ground?: boolean; hero?: boolean; fittedDist?: number; camDir?: [number, number]; illustration?: boolean }) {
+  // 'hero' = the static illustration render (elevated three-quarter, Bower&Branch-style): uses the
+  // ground view's DIMENSIONAL contents (roof, slabs, furniture) but floats on paper — no sky, no
+  // apron, no controls, no capture labels — and the built environment goes pale LINE-ART so the
+  // landscape owns all the color.
+  const groundish = ground || hero;
+  // Illustration mode applies wherever it's requested — iso (yard-3d) and ground (plan-ready).
+  const illustrate = illustration;
   const data = useMemo(() => {
     const read = (k: string) => { try { return JSON.parse(localStorage.getItem(k) || '{}'); } catch { return {}; } };
     const bf = read('diyBoundaryFinal');
@@ -297,18 +326,22 @@ function Scene({ houseAttrs }: { houseAttrs?: { stories?: number; material?: str
     const exTrees = feats.filter(f => f.keep && f.type === 'tree' && f.vertices.length >= 3).map(f => { const r = toRing(f); const [tx, ty] = centroid(r); return { x: tx, y: ty, rad: Math.sqrt(ringArea(r) / Math.PI) }; });
     const ringOf = (s: any): Ring | null => (s.ring && s.ring.length >= 3) ? s.ring : null;
     const beds = (plan.beds || []).map((b: any) => ({ ring: ringOf(b), color: bedColor(b), kind: bedKind(b) })).filter((b: any) => b.ring);
-    const zones = (plan.zones || []).map((z: any) => ({ ring: ringOf(z), color: zoneColor(z), kind: zoneKind(z), lawn: z.key === 'lawn', water: /water|pool|pond|spa/i.test(`${z.key || ''} ${z.label || ''}`) })).filter((z: any) => z.ring);
+    const zones = (plan.zones || []).map((z: any) => ({ ring: ringOf(z), color: zoneColor(z), kind: zoneKind(z), lawn: z.key === 'lawn', water: /water|pool|pond|spa/i.test(`${z.key || ''} ${z.label || ''}`), key: z.key || '', label: z.label || '' })).filter((z: any) => z.ring);
     const paths = (plan.paths || []).filter((p: any) => (p.pts || []).length >= 2);
     const primaryColor = primaryColorOf(plan.primary);
     const primaryKindV = primaryKind(plan.primary);
     const size = Math.max(...boundaryFt.map(p => Math.hypot(p[0] - cx, p[1] - cy))) * 2;
-    return { boundaryFt, cx, cy, houses, structures, hardscapes, exTrees, beds, zones, paths, instances, size, primaryColor, primaryKindV };
+    // Street View roof facts (front yards only; null when absent) drive the roof shape + colour.
+    const svHouse = getStreetViewInsights()?.house ?? null;
+    const roofType = svHouse?.roofType ?? null;
+    const roofColorHex = svHouse?.roofColorHex ?? null;
+    return { boundaryFt, cx, cy, houses, structures, hardscapes, exTrees, beds, zones, paths, instances, size, primaryColor, primaryKindV, roofType, roofColorHex };
   }, []);
   // "Plan card" — a thin base the whole yard sits on, for the floating-diorama look.
   const baseGeo = useMemo(() => data ? new THREE.ExtrudeGeometry(flatShape(data.boundaryFt, data.cx, data.cy), { depth: 1.4, bevelEnabled: false }) : null, [data]);
 
   if (!data) return null;
-  const { boundaryFt, cx, cy, houses, structures, hardscapes, exTrees, beds, zones, paths, instances, size, primaryColor, primaryKindV } = data;
+  const { boundaryFt, cx, cy, houses, structures, hardscapes, exTrees, beds, zones, paths, instances, size, primaryColor, primaryKindV, roofType, roofColorHex } = data;
 
   // path strips → flat gray quads per segment
   const pathQuads: Ring[] = [];
@@ -322,63 +355,232 @@ function Scene({ houseAttrs }: { houseAttrs?: { stories?: number; material?: str
     }
   }
 
+  // ── Capture label inventory (ground view only). Anchors reuse the exact feet→world mapping
+  //    used everywhere else: X = fx - cx, Z = fy - cy. Skip any anchor we can't compute. ──
+  const captureLabels = useMemo(() => {
+    if (!ground) return [] as { key: string; text: string; pos: [number, number, number] }[];
+    const out: { key: string; text: string; pos: [number, number, number] }[] = [];
+    // (a) feature zones — label at the centroid, floated above the yard.
+    zones.forEach((z: any, i: number) => {
+      const text = (z.label || (z.lawn ? 'LAWN' : z.key) || 'FEATURE').toUpperCase();
+      const [fcx, fcy] = centroid(z.ring);
+      out.push({ key: `zl${i}`, text, pos: [fcx - cx, z.lawn ? 4 : 5.5, fcy - cy] });
+    });
+    // (b) paths — WALKWAY / DRY CREEK above the polyline midpoint.
+    paths.forEach((p: any, i: number) => {
+      const pts = p.pts || []; if (pts.length < 2) return;
+      const mid = pts[Math.floor(pts.length / 2)];
+      if (!mid) return;
+      out.push({ key: `pl${i}`, text: p.kind === 'creek' ? 'DRY CREEK' : 'WALKWAY', pos: [mid[0] - cx, 3, mid[1] - cy] });
+    });
+    // (c) plant species — one label per distinct species, above the LARGEST instance, top-10 by count.
+    const byName = new Map<string, { count: number; best: PlantInstance; r: number }>();
+    for (const p of instances) {
+      const nm = (p.name || '').trim(); if (!nm) continue;
+      const r = Math.max(0.3, (p.widthFt || 0) / 2);
+      const e = byName.get(nm);
+      if (!e) byName.set(nm, { count: 1, best: p, r });
+      else { e.count++; if (r > e.r) { e.r = r; e.best = p; } }
+    }
+    [...byName.entries()].sort((a, b) => b[1].count - a[1].count).slice(0, 10).forEach(([nm, e], i) => {
+      const p = e.best;
+      out.push({ key: `sl${i}`, text: nm.toUpperCase(), pos: [p.x - cx, Math.max(0.4, p.heightFt || 0) + 2.5, p.y - cy] });
+    });
+    // (d) house — above the roof ridge (wall top + ~8 ft).
+    houses.forEach((r: Ring, i: number) => {
+      const [hx, hy] = centroid(r);
+      const wallTop = Math.max(1, houseAttrs?.stories || 1) * 10;
+      out.push({ key: `hl${i}`, text: 'HOUSE', pos: [hx - cx, wallTop + 8, hy - cy] });
+    });
+    return out;
+  }, [ground, zones, paths, instances, houses, cx, cy, houseAttrs]);
+
+  // ── Ground-view sun: behind & to the left of the initial camera, elevated ~40°, warm — so
+  //    the yard is front-lit from the viewer's POV with soft long shadows. Iso keeps its fixed sun.
+  const sun = useMemo(() => {
+    if (!groundish) return { pos: [size * 0.55, size * 1.25, size * 0.5] as [number, number, number], color: '#ffffff', intensity: 1.05 };
+    let cdx = camDir[0], cdz = camDir[1]; const cl = Math.hypot(cdx, cdz) || 1; cdx /= cl; cdz /= cl; // camera→origin is -camDir
+    // "Behind the camera" = along +camDir; "to the left" = rotate that 90° (screen-left).
+    const leftX = -cdz, leftZ = cdx; // left of the forward (toward-house) direction
+    const bx = cdx * 0.7 + leftX * 0.7, bz = cdz * 0.7 + leftZ * 0.7; // behind + left blend
+    const bl = Math.hypot(bx, bz) || 1;
+    const horiz = size * 1.1, height = size * 1.1; // ~40° elevation
+    return { pos: [(bx / bl) * horiz, height, (bz / bl) * horiz] as [number, number, number], color: '#ffe8c8', intensity: 1.15 };
+  }, [ground, camDir, size]);
+
   return (
     <>
-      {/* Even fill + a soft directional sun that casts the plan's shadows */}
-      <ambientLight intensity={0.62} />
-      <hemisphereLight args={['#ffffff', '#c7cdbb', 0.55]} />
+      {/* Even fill + a directional sun that casts the plan's shadows. Illustration mode (iso only)
+          cranks the ambient/hemi fill and drops the sun way down with shadows off, so surfaces
+          read as flat watercolor panels instead of photoreal shading — see (C) FLAT WATERCOLOR
+          FILLS in the illustration-mode prototype. */}
+      <ambientLight intensity={illustrate ? 1.05 : 0.62} />
+      <hemisphereLight args={['#ffffff', '#c7cdbb', illustrate ? 0.85 : 0.55]} />
       <directionalLight
-        position={[size * 0.55, size * 1.25, size * 0.5]} intensity={1.05} castShadow
+        position={sun.pos} intensity={illustrate ? 0.28 : sun.intensity} color={sun.color} castShadow={!illustrate}
         shadow-mapSize-width={2048} shadow-mapSize-height={2048}
         shadow-camera-left={-size} shadow-camera-right={size} shadow-camera-top={size} shadow-camera-bottom={-size}
         shadow-camera-near={1} shadow-camera-far={size * 5} shadow-bias={-0.0004}
       />
+
+      {/* Ground view only: gradient sky dome + a big neutral ground apron so the yard sits in a
+          continuous landscape (hides the diorama slab edge) instead of on a floating card. */}
+      {ground && <SkyDome radius={Math.max(size * 10, fittedDist * 3)} illustrate={illustrate} />}
+      {ground && (
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]} receiveShadow>
+          <circleGeometry args={[size * 8, 48]} />
+          {/* Illustration: mute the apron toward paper (keeps a hint of sage) so it reads as page. */}
+          <meshStandardMaterial color={illustrate ? '#c8d0b0' : '#8ea86f'} roughness={0.98} />
+        </mesh>
+      )}
 
       {/* plan card */}
       {baseGeo && <mesh geometry={baseGeo} rotation={[-Math.PI / 2, 0, 0]} position={[0, -1.41, 0]} receiveShadow><meshStandardMaterial color="#ECE8DC" /></mesh>}
 
       {/* base ground = primary planting material */}
       <Ground ring={boundaryFt} cx={cx} cy={cy} color={primaryColor} kind={primaryKindV} y={0} />
-      {beds.map((b: any, i: number) => <Ground key={`bed${i}`} ring={b.ring} cx={cx} cy={cy} color={b.color} kind={b.kind} y={0.02} />)}
+      {beds.map((b: any, i: number) => <Ground key={`bed${i}`} ring={b.ring} cx={cx} cy={cy} color={b.color} kind={b.kind} y={groundish ? 0.1 : 0.02} />)}
       {/* Lawn sits just below feature zones so features cleanly occlude it (it's a base region
-          that overlaps them — moving a feature out reveals the lawn beneath, no re-carve needed). */}
+          that overlaps them — moving a feature out reveals the lawn beneath, no re-carve needed).
+          GROUND VIEW: the lawn runs UNDER feature pads, and coplanar decals (4mm apart) z-fight at
+          eye-level grazing angles — the lawn shimmers through and furniture "sits on grass". So at
+          eye level, feature pads render as raised SLABS (real paver-pad thickness) and the decal
+          layers get real depth separation. The iso diorama keeps its flat decals. */}
       {zones.map((z: any, i: number) => z.water
-        ? <Ground key={`zone${i}`} ring={z.ring} cx={cx} cy={cy} color="#5fa8c8" y={0.06} opacity={0.82} />
-        : <Ground key={`zone${i}`} ring={z.ring} cx={cx} cy={cy} color={z.color} kind={z.kind} y={z.lawn ? 0.015 : 0.03} />)}
-      {pathQuads.map((q, i) => <Ground key={`path${i}`} ring={q} cx={cx} cy={cy} color={PATH_COLOR} kind="pavers" y={0.04} />)}
+        ? <Ground key={`zone${i}`} ring={z.ring} cx={cx} cy={cy} color="#5fa8c8" y={groundish ? 0.14 : 0.06} opacity={0.82} />
+        : groundish && !z.lawn
+          ? <ZoneSlab key={`zone${i}`} ring={z.ring} cx={cx} cy={cy} color={z.color} kind={z.kind} />
+          : <Ground key={`zone${i}`} ring={z.ring} cx={cx} cy={cy} color={z.color} kind={z.kind} y={z.lawn ? 0.015 : 0.03} />)}
+      {pathQuads.map((q, i) => <Ground key={`path${i}`} ring={q} cx={cx} cy={cy} color={PATH_COLOR} kind="pavers" y={groundish ? 0.18 : 0.04} />)}
 
       {/* structures — house height/material/colour from house attributes (manual or detected) */}
-      {houses.map((r, i) => <Building key={`h${i}`} ring={r} cx={cx} cy={cy} height={Math.max(1, houseAttrs?.stories || 1) * 10} color={houseAttrs?.color || '#d2cdc0'} kind={wallKind(houseAttrs?.material)} />)}
-      {structures.map((r, i) => <Building key={`s${i}`} ring={r} cx={cx} cy={cy} height={9} color="#c8c2b4" />)}
-      {hardscapes.map((r, i) => <Ground key={`hs${i}`} ring={r} cx={cx} cy={cy} color={HARDSCAPE_COLOR} kind="concrete" y={0.05} />)}
+      {houses.map((r, i) => <Building key={`h${i}`} ring={r} cx={cx} cy={cy} height={Math.max(1, houseAttrs?.stories || 1) * 10} color={hero ? '#f3f1ea' : (houseAttrs?.color || '#d2cdc0')} kind={hero ? undefined : wallKind(houseAttrs?.material)} />)}
+      {/* Ground view only: a simple roof gives houses a correct silhouette at eye level
+          (flat ExtrudeGeometry looks roofless). 'modern' → thin parapet cap; else a hip roof. */}
+      {groundish && houses.map((r, i) => <HipRoof key={`roof${i}`} ring={r} cx={cx} cy={cy} wallTop={Math.max(1, houseAttrs?.stories || 1) * 10} style={houseAttrs?.style} roofType={roofType} roofColorHex={hero ? '#dcd9d0' : roofColorHex} />)}
+      {structures.map((r, i) => <Building key={`s${i}`} ring={r} cx={cx} cy={cy} height={9} color={hero ? '#efede6' : '#c8c2b4'} />)}
+      {hardscapes.map((r, i) => <Ground key={`hs${i}`} ring={r} cx={cx} cy={cy} color={hero ? '#f0eee9' : HARDSCAPE_COLOR} kind={hero ? undefined : 'concrete'} y={groundish ? 0.22 : 0.05} />)}
 
       {/* existing trees */}
+      {/* world Z = y − cy (see the canonical-convention note at flatShape) */}
       {exTrees.map((t: any, i: number) => <ExistingTree key={`et${i}`} x={t.x - cx} z={t.y - cy} rad={t.rad} />)}
 
       {/* designed plants */}
       {instances.map((p, i) => <Plant key={`p${i}`} p={p} cx={cx} cy={cy} />)}
 
-      <OrbitControls target={[0, 0, 0]} maxPolarAngle={Math.PI / 2.05} minDistance={size * 0.25} maxDistance={size * 2.5} />
+      {/* Ground view only: furniture proxies so positions come from our geometry, not the model. */}
+      {/* raised by the slab height so furniture stands ON the pad, not sunk into it */}
+      {groundish && <group position={[0, 0.3, 0]}>{zones.map((z: any, i: number) => <ZoneProxy key={`zp${i}`} zone={z} cx={cx} cy={cy} />)}</group>}
+
+      {/* Ground view only: capture-only text labels — hidden on-screen, shown during capture (see
+          CaptureBridge) so Gemini can read the object identities burned into the conditioning image. */}
+      {ground && (
+        <group name="capture-labels" visible={false}>
+          {captureLabels.map(l => <CaptureLabel key={l.key} text={l.text} pos={l.pos} size={size} />)}
+        </group>
+      )}
+
+      {!hero && <OrbitControls
+        target={ground ? (() => { const hc = houses.length ? centroid(houses[0]) : [cx, cy]; return [hc[0] - cx, 6, hc[1] - cy] as [number, number, number]; })() : [0, 0, 0]}
+        maxPolarAngle={Math.PI / 2.05}
+        minDistance={ground ? fittedDist * 0.35 : size * 0.25}
+        maxDistance={ground ? fittedDist * 2 : size * 2.5}
+      />}
+
+      {/* Illustration mode (iso only): ink outlines + gentle desaturate/warm grade — (A) INK
+          OUTLINES and (D) COLOR GRADE in the illustration-mode prototype. Mounted last so the
+          post pass sees the fully-built scene. */}
+      {illustrate && <IllustrationEffects />}
     </>
   );
 }
 
-export default function Yard3D({ houseAttrs }: { houseAttrs?: { stories?: number; material?: string; color?: string; style?: string } }) {
-  const size = useMemo(() => {
+export default function Yard3D({ houseAttrs, view = 'iso', exportRef, illustration = false }: {
+  houseAttrs?: { stories?: number; material?: string; color?: string; style?: string };
+  /** 'iso' = floating diorama; 'ground' = eye-level facing the house; 'hero' = the STATIC
+   *  illustration render — elevated three-quarter, house at the back, no controls, paper page. */
+  view?: 'iso' | 'ground' | 'hero';
+  /** Receives a capture fn returning the current view as a PNG data URL. */
+  exportRef?: React.MutableRefObject<(() => string | null) | null>;
+  /** Illustration (hand-drawn NPR) styling — works on all views (hero forces it on). */
+  illustration?: boolean;
+}) {
+  const geom = useMemo(() => {
+    const FOV = 52; // vertical fov (deg) — kept in sync with the Canvas below
     try {
       const bf = JSON.parse(localStorage.getItem('diyBoundaryFinal') || '{}');
       const b: [number, number][] = bf.boundary || [];
-      if (b.length < 3) return 60;
+      if (b.length < 3) return { size: 60, cam: [0, 5.5, 60] as [number, number, number], fitted: 60, heroCam: [0, 45, 65] as [number, number, number], heroTarget: [0, 3, 0] as [number, number, number] };
       const cs = buildCS(b); const ft = b.map(v => cs(v[0], v[1])) as Ring; const [cx, cy] = centroid(ft);
-      return Math.max(20, Math.max(...ft.map(p => Math.hypot(p[0] - cx, p[1] - cy))) * 2);
-    } catch { return 60; }
-  }, []);
+      const size = Math.max(20, Math.max(...ft.map(p => Math.hypot(p[0] - cx, p[1] - cy))) * 2);
+      // Ground camera: eye level at the yard edge OPPOSITE the house, looking toward it —
+      // the classic "standing at the street" viewpoint (works for back yards too: opposite side).
+      const houses = (bf.confirmedFeatures || []).filter((f: any) => f.keep && f.type === 'house' && (f.vertices?.length ?? 0) >= 3);
+      let dirX = 0, dirZ = 1;
+      if (houses.length) {
+        const hr = houses[0].vertices.map((v: [number, number]) => cs(v[0], v[1])) as Ring;
+        const [hx, hy] = centroid(hr);
+        const wx = hx - cx, wz = hy - cy; const L = Math.hypot(wx, wz) || 1;
+        dirX = -wx / L; dirZ = -wz / L; // away from the house
+      }
+      // ── Auto-fit: place the camera so the boundary's bounding sphere (incl. house height)
+      //    fits within the fov. Only the horizontal distance grows; eye height stays human. ──
+      const houseTop = Math.max(1, houseAttrs?.stories || 1) * 10;
+      // Bounding sphere: horizontal radius = size/2 (max reach from centroid), plus half the
+      // vertical extent so a tall house near the top of frame isn't clipped.
+      const sphereR = Math.hypot(size / 2, houseTop / 2) * 1.12; // ~12% margin
+      const vFov = FOV * Math.PI / 180;
+      // Horizontal fov from the canvas aspect (assume ~16:10 when unknown).
+      const aspect = 16 / 10;
+      const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+      const fov = Math.min(vFov, hFov); // tighter constraint governs the fit distance
+      const fitted = Math.max(size * 0.4, sphereR / Math.sin(fov / 2));
+      // Keep eye at 5.5ft; only let it rise (to ≤9ft) if the fit distance is huge (very deep yard).
+      const eyeY = Math.min(9, 5.5 + Math.max(0, fitted - size * 1.4) * 0.02);
+      const cam: [number, number, number] = [dirX * fitted, eyeY, dirZ * fitted];
+      // ── HERO camera: elevated three-quarter (Bower&Branch composition) — same "opposite the
+      //    house" azimuth, ~35° elevation, fov 45, auto-fit; gaze pulled slightly houseward so
+      //    the house sits at the back of frame and the yard fans toward the viewer. ──
+      const HERO_ELEV = 35 * Math.PI / 180, HERO_FOV = 45 * Math.PI / 180;
+      const hHFov = 2 * Math.atan(Math.tan(HERO_FOV / 2) * aspect);
+      const heroDist = Math.max(size * 0.6, (sphereR * 1.08) / Math.sin(Math.min(HERO_FOV, hHFov) / 2));
+      const hh = heroDist * Math.cos(HERO_ELEV);
+      const heroCam: [number, number, number] = [dirX * hh, heroDist * Math.sin(HERO_ELEV), dirZ * hh];
+      // Local house centroid (world frame X = x−cx, Z = y−cy) for the gaze target.
+      let hcX = 0, hcZ = 0;
+      if (houses.length) { const hr2 = houses[0].vertices.map((v: [number, number]) => cs(v[0], v[1])) as Ring; const [hx2, hy2] = centroid(hr2); hcX = hx2 - cx; hcZ = hy2 - cy; }
+      const heroTarget: [number, number, number] = [hcX * 0.3, houseTop * 0.25, hcZ * 0.3];
+      return { size, cam, fitted, heroCam, heroTarget };
+    } catch { return { size: 60, cam: [0, 5.5, 60] as [number, number, number], fitted: 60, heroCam: [0, 45, 65] as [number, number, number], heroTarget: [0, 3, 0] as [number, number, number] }; }
+  }, [houseAttrs]);
+  const { size, cam, fitted, heroCam, heroTarget } = geom;
   const d = size * 2;
-  // Orthographic + a true-isometric direction ([1,1,1]) = the landscaping-plan look.
-  return (
-    <Canvas shadows orthographic camera={{ position: [d, d, d], zoom: Math.max(2.5, 560 / size), near: 0.1, far: d * 6 }} style={{ width: '100%', height: '100%' }}>
-      <color attach="background" args={['#EEF0E9']} />
-      <Scene houseAttrs={houseAttrs} />
+  return view === 'hero' ? (
+    // STATIC illustration render — elevated three-quarter on a paper page, no controls, no sky.
+    // Consumers capture this via exportRef and show the resulting PNG; this canvas itself is
+    // typically mounted offscreen and unmounted after capture.
+    <Canvas shadows gl={{ preserveDrawingBuffer: true }}
+      camera={{ position: heroCam, fov: 45, near: 0.5, far: Math.max(d, fitted) * 8 }}
+      onCreated={({ camera }) => { camera.lookAt(heroTarget[0], heroTarget[1], heroTarget[2]); camera.updateProjectionMatrix(); }}
+      style={{ width: '100%', height: '100%' }}>
+      <color attach="background" args={[PAPER_BG]} />
+      <Scene houseAttrs={houseAttrs} hero fittedDist={fitted} camDir={[heroCam[0], heroCam[2]]} illustration />
+      {exportRef && <CaptureBridge exportRef={exportRef} />}
+    </Canvas>
+  ) : view === 'ground' ? (
+    // Eye-level perspective — the massing reference for the photorealistic render.
+    <Canvas shadows gl={{ preserveDrawingBuffer: true }}
+      camera={{ position: cam, fov: 52, near: 0.5, far: Math.max(d, fitted) * 6 }} style={{ width: '100%', height: '100%' }}>
+      <Scene houseAttrs={houseAttrs} ground fittedDist={fitted} camDir={[cam[0], cam[2]]} illustration={illustration} />
+      {exportRef && <CaptureBridge exportRef={exportRef} />}
+    </Canvas>
+  ) : (
+    // Orthographic + a true-isometric direction ([1,1,1]) = the landscaping-plan look.
+    <Canvas shadows gl={exportRef ? { preserveDrawingBuffer: true } : undefined}
+      orthographic camera={{ position: [d, d, d], zoom: Math.max(2.5, 560 / size), near: 0.1, far: d * 6 }} style={{ width: '100%', height: '100%' }}>
+      <color attach="background" args={[illustration ? PAPER_BG : '#EEF0E9']} />
+      <Scene houseAttrs={houseAttrs} illustration={illustration} />
+      {exportRef && <CaptureBridge exportRef={exportRef} />}
     </Canvas>
   );
 }
