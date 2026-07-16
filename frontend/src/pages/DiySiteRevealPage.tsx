@@ -1,8 +1,7 @@
 import { useState, useRef, useLayoutEffect, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import IllustrativeSite from '../components/IllustrativeSite';
-
-const IT = "'Inter', system-ui, sans-serif";
+import { IT } from '../lib/theme';
 
 // Interstitial after /boundary: animates the project area being "drawn," holds a beat, then
 // fades into /auto-layout automatically — no button.

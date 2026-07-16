@@ -1,10 +1,8 @@
 import { useRef, useEffect, useLayoutEffect } from 'react';
 import { sketchStroke, sketchRing, scallopPath, graphGrid, hatchPattern } from '../lib/sketch';
+import { HAND, INK } from '../lib/theme';
 // Draw before paint so the static base never flashes blank on mount (avoids a jump at the hand-off).
 const useIsoLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
-
-const IT = "'Inter', system-ui, sans-serif";
-const HAND = "'Caveat', cursive";
 function cleanLabel(type: string, label: string): string {
   if (type === 'house') return 'House';
   const tail = (label || '').includes('—') ? (label.split('—').pop() || '').trim() : (label || '').trim();
@@ -167,7 +165,7 @@ export default function IllustrativeSite({ width, height, animate = true, durati
       ctx.save(); ctx.globalAlpha = alpha; ctx.translate(cx, cy); ctx.rotate(rot);
       ctx.font = `600 18px ${HAND}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.lineWidth = 3.5; ctx.strokeStyle = 'rgba(247,243,234,0.92)'; ctx.lineJoin = 'round'; ctx.strokeText(text, 0, 0);
-      ctx.fillStyle = '#40392e'; ctx.fillText(text, 0, 0); ctx.restore();
+      ctx.fillStyle = INK; ctx.fillText(text, 0, 0); ctx.restore();
     };
     // Tree: loose wobbly canopy with a defined ink edge (so it reads as a tree, not a smudge),
     // translucent fill so anything beneath stays visible, plus scribbled foliage texture.

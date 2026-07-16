@@ -7,9 +7,8 @@ import { GoogleMap, useJsApiLoader, Polygon, OverlayView } from '@react-google-m
 import Logo from '../../components/Logo';
 import { proposeBoundary } from '../../services/boundaryProposer';
 import type { ConfirmedFeature } from '../DiyFeatureConfirmPage';
+import { IS, IT, PAGE_BG } from '../../lib/theme';
 
-const IS = "'Instrument Serif', serif";
-const IT = "'Inter Tight', sans-serif";
 const GOOGLE_MAPS_KEY = (import.meta as any).env?.VITE_GOOGLE_MAPS_KEY ?? '';
 const FEATURE_COLOR: Record<string, string> = { house: '#C98A3A', tree: '#2F6B4F', hardscape: '#B9B2A4', structure: '#8A7B9A' };
 
@@ -71,7 +70,7 @@ export default function DraftConfirmPage() {
   // No house detected → we can't propose responsibly; hand off to the classic draw flow.
   if (!proposal) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-4 px-6" style={{ backgroundColor: '#efe9db' }}>
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4 px-6" style={{ backgroundColor: PAGE_BG }}>
         <Logo />
         <h1 style={{ fontFamily: IS, fontSize: '2rem', color: '#2A2A26', fontWeight: 400, textAlign: 'center' }}>We couldn't read your yard automatically</h1>
         <p style={{ fontFamily: IT, fontSize: '0.95rem', color: '#6A6A60', maxWidth: 460, textAlign: 'center', lineHeight: 1.55 }}>
@@ -87,7 +86,7 @@ export default function DraftConfirmPage() {
   }
 
   return (
-    <div className="h-screen flex" style={{ backgroundColor: '#F4F0E6', overflow: 'hidden' }}>
+    <div className="h-screen flex" style={{ backgroundColor: PAGE_BG, overflow: 'hidden' }}>
       {/* Left panel */}
       <div className="flex flex-col" style={{ width: 'min(420px, 38vw)', flexShrink: 0 }}>
         <div className="px-8 pt-7 pb-4"><Logo /></div>
@@ -96,7 +95,7 @@ export default function DraftConfirmPage() {
             Is this your project area?
           </h1>
           <p style={{ fontFamily: IT, fontSize: '0.9rem', color: '#6A6A60', lineHeight: 1.55, margin: '0 0 18px' }}>
-            We outlined the {sc.yard_type === 'back' ? 'back' : 'front'} yard from your scan{adjusting ? ' — drag the corners to fix it' : ''}. We also found these — tap any that are wrong:
+            We outlined the {sc.yard_type === 'back' ? 'backyard' : 'front yard'} from your scan{adjusting ? ' — drag the corners to fix it' : ''}. We also found these — tap any that are wrong:
           </p>
 
           <div className="flex flex-wrap gap-1.5" style={{ marginBottom: 18 }}>

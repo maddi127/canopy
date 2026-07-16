@@ -6,8 +6,7 @@ import Logo from '../components/Logo';
 import type { ConfirmedFeature } from './DiyFeatureConfirmPage';
 
 const GOOGLE_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY || '';
-const IT = "'Inter Tight', sans-serif";
-const IS = "'Instrument Serif', serif";
+import { IS, IT, PAGE_BG } from '../lib/theme';
 
 const ZONE_COLORS: Record<string, string> = {
   planting_bed:  '#52B788',
@@ -249,7 +248,7 @@ export default function DiyLayoutPage() {
 
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
-    <div className="h-screen flex flex-col" style={{ backgroundColor: '#efe9db', overflow: 'hidden' }}>
+    <div className="h-screen flex flex-col" style={{ backgroundColor: PAGE_BG, overflow: 'hidden' }}>
 
       <div className="flex items-center justify-between px-10 py-4 flex-shrink-0">
         <Logo />

@@ -2,9 +2,7 @@
 import { useNavigate } from 'react-router-dom';
 import Logo from '../../components/Logo';
 import AddressInput from '../../features/onboarding/AddressInput';
-
-const IS = "'Instrument Serif', serif";
-const IT = "'Inter Tight', sans-serif";
+import { IS, IT, PAGE_BG } from '../../lib/theme';
 
 export default function DraftStartPage() {
   const navigate = useNavigate();
@@ -20,7 +18,7 @@ export default function DraftStartPage() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ backgroundColor: '#efe9db' }}>
+    <div className="min-h-screen flex flex-col" style={{ backgroundColor: PAGE_BG }}>
       <div className="px-10 pt-8"><Logo /></div>
       <div className="flex-1 flex flex-col items-center justify-center px-6" style={{ marginTop: '-6vh' }}>
         <h1 style={{ fontFamily: IS, fontSize: 'clamp(2.4rem, 5vw, 3.6rem)', color: '#2A2A26', fontWeight: 400, lineHeight: 1.08, textAlign: 'center', margin: 0 }}>

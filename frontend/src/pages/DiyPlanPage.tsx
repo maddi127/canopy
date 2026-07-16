@@ -1,10 +1,10 @@
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
+import BackButton from '../components/BackButton';
 import { PLANTS, type Plant } from '../features/planting/plantDatabase';
 
-const IT = "'Inter Tight', sans-serif";
-const IS = "'Instrument Serif', serif";
+import { IS, IT, PAGE_BG } from '../lib/theme';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -133,7 +133,7 @@ export default function DiyPlanPage() {
   const totalSpecies = finalPlants.length;
 
   return (
-    <div className="h-screen flex flex-col" style={{ backgroundColor: '#efe9db', overflow: 'hidden' }}>
+    <div className="h-screen flex flex-col" style={{ backgroundColor: PAGE_BG, overflow: 'hidden' }}>
       <style>{`
         @media print {
           .no-print { display: none !important; }
@@ -249,13 +249,10 @@ export default function DiyPlanPage() {
       </div>
 
       {/* Bottom nav */}
-      <button
+      <BackButton
         onClick={() => navigate('/diy/refine')}
-        className="fixed bottom-6 left-10 hover:opacity-70 transition-all no-print"
-        style={{ fontFamily: IT, fontSize: '0.85rem', color: '#7A7A73', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}
-      >
-        ← back
-      </button>
+        className="fixed bottom-6 left-10 no-print"
+      />
 
       <button
         onClick={() => navigate('/')}
@@ -329,9 +326,6 @@ function PlantRow({ plant: p, qty, mine }: { plant: Plant; qty: number; mine: bo
 }
 
 function ZoneNotes({ zone, style }: { zone: number; style: string }) {
-  const IT = "'Inter Tight', sans-serif";
-  const IS = "'Instrument Serif', serif";
-
   const seasonNote = zone <= 5
     ? 'Short growing season — plant after last frost (May–June). Mulch perennials in fall.'
     : zone <= 7

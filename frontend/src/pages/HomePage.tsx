@@ -1,19 +1,16 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
 import AddressInput from '../features/onboarding/AddressInput';
-import { clearLocalState } from '../services/projectsService';
+import { clearAllDesignState } from '../services/projectsService';
+import { IS, IT, INK, GREEN, PAGE_BG } from '../lib/theme';
 
 const BG      = '#e8e3d5';
-const DARK    = '#1a1a16';
+const DARK    = INK;
 const RUST    = '#c96b3a';
 const OLIVE   = '#6b7a48';   // italic accent in the headline
-const GREEN   = '#4c6440';   // primary buttons + CTA band
 const PANEL   = '#efe9dd';   // step-illustration card backdrop
 const MUTED   = '#7c7768';
-const IS = "'Instrument Serif', serif";
-const IT = "'Inter Tight', sans-serif";
-const INK = '#40392e';   // hand-drawn outline ink, matching the plan painter
 
 // ── Watercolour plant blobs (echo the illustrated plan style) ────────────────────
 // Seeded so the shapes are stable across renders. A "foliage" blob is a lobed scallop —
@@ -226,9 +223,17 @@ const STEP_ILLUSTRATIONS = [PreferencesIllustration, SitePlanIllustration, Finet
 
 export default function HomePage() {
   const navigate = useNavigate();
+  const [showMobileGate, setShowMobileGate] = useState(false);
+
+  // The design flow (drawing on a map, editing a detailed plan) needs real screen real estate, so we
+  // gate its START on phones and very short windows — measured at click time, not render, so a rotate
+  // or resize is always reflected. Everything else on the homepage stays browsable on any device.
+  const tooSmallToDesign = () =>
+    typeof window !== 'undefined' && (window.innerWidth <= 768 || window.innerHeight <= 450);
 
   const handleAddressSelect = useCallback((address: string, lat: number, lng: number) => {
-    clearLocalState();
+    if (tooSmallToDesign()) { setShowMobileGate(true); return; }
+    clearAllDesignState();
     localStorage.setItem('initialAddress', JSON.stringify({ address, lat, lng }));
     localStorage.setItem('siteContext', JSON.stringify({ address, lat, lng }));
     navigate('/diy/preferences');
@@ -238,12 +243,13 @@ export default function HomePage() {
   // the address is captured later, above the map on the boundary page. Entering an address in the
   // hero input still auto-advances via handleAddressSelect (which also stores siteContext).
   const startPlan = useCallback(() => {
-    clearLocalState();   // fresh design — the address is captured above the map on the boundary page
+    if (tooSmallToDesign()) { setShowMobileGate(true); return; }
+    clearAllDesignState();   // fresh design — the address is captured above the map on the boundary page
     navigate('/diy/preferences');
   }, [navigate]);
 
   return (
-    <div style={{ minHeight: '100vh', backgroundColor: BG, fontFamily: IT }}>
+    <div style={{ minHeight: '100vh', backgroundColor: PAGE_BG, fontFamily: IT }}>
 
       {/* Shared hand-painted edge filter for the watercolour plan illustrations */}
       <svg width="0" height="0" style={{ position: 'absolute' }} aria-hidden>
@@ -256,7 +262,7 @@ export default function HomePage() {
       </svg>
 
       {/* ── Header ── */}
-      <header style={{ padding: '22px 48px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', maxWidth: '1120px', margin: '0 auto' }}>
+      <header className="hp-header" style={{ padding: '22px 48px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', maxWidth: '1120px', margin: '0 auto' }}>
         <Logo />
         <button onClick={startPlan}
           style={{ fontFamily: IT, fontSize: '0.88rem', fontWeight: 500, color: BG, backgroundColor: DARK, border: 'none', borderRadius: '100px', padding: '10px 20px', cursor: 'pointer' }}>
@@ -265,7 +271,7 @@ export default function HomePage() {
       </header>
 
       {/* ── Hero ── */}
-      <section style={{ padding: '40px 48px 80px', display: 'grid', gridTemplateColumns: '1.05fr 0.95fr', gap: '48px', alignItems: 'center', maxWidth: '1120px', margin: '0 auto' }}>
+      <section className="hp-hero" style={{ padding: '40px 48px 80px', display: 'grid', gridTemplateColumns: '1.05fr 0.95fr', gap: '48px', alignItems: 'center', maxWidth: '1120px', margin: '0 auto' }}>
         {/* Left */}
         <div>
           <h1 style={{ fontFamily: IS, fontSize: 'clamp(2.8rem, 5vw, 4.6rem)', color: DARK, lineHeight: 1.04, margin: '0 0 22px', fontWeight: 400 }}>
@@ -277,22 +283,18 @@ export default function HomePage() {
           </p>
 
           {/* Address input pill with inline CTA */}
-          <div className="hero-address-wrapper" style={{ display: 'flex', alignItems: 'center', backgroundColor: 'white', borderRadius: '100px', padding: '6px 6px 6px 18px', boxShadow: '0 4px 28px rgba(26,26,22,0.13)', maxWidth: '460px' }}>
+          <div className="hero-address-wrapper" style={{ display: 'flex', alignItems: 'center', backgroundColor: 'white', borderRadius: '100px', padding: '6px 18px', boxShadow: '0 4px 28px rgba(26,26,22,0.13)', maxWidth: '460px' }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0, marginRight: '8px' }}>
               <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="#9a9485" />
             </svg>
             <div style={{ flex: 1, minWidth: 0 }}>
               <AddressInput onAddressSelect={handleAddressSelect} />
             </div>
-            <button onClick={startPlan}
-              style={{ flexShrink: 0, fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, color: '#f2eee2', backgroundColor: GREEN, border: 'none', borderRadius: '100px', padding: '10px 18px', cursor: 'pointer', whiteSpace: 'nowrap' }}>
-              Design my yard
-            </button>
           </div>
 
           {/* Feature pills */}
           <div style={{ display: 'flex', gap: '22px', marginTop: '16px' }}>
-            {['First draft in minutes', 'Unlimited plan edits'].map(t => (
+            {['First draft in minutes', 'Unlimited plan edits', '100% satisfaction guarantee'].map(t => (
               <span key={t} style={{ display: 'flex', alignItems: 'center', gap: '7px', fontFamily: IT, fontSize: '0.78rem', color: '#8a8574' }}>
                 <span style={{ color: '#b4af9c' }}>✦</span>{t}
               </span>
@@ -301,14 +303,14 @@ export default function HomePage() {
         </div>
 
         {/* Right — illustration */}
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <div className="hp-hero-illo" style={{ display: 'flex', justifyContent: 'flex-end' }}>
           <PlanIllustration />
         </div>
       </section>
 
       {/* ── How it works heading ── */}
-      <section style={{ padding: '72px 48px 0', maxWidth: '1120px', margin: '0 auto', textAlign: 'center' }}>
-        <p style={{ fontFamily: IT, fontSize: '0.78rem', color: '#3d5c3a', letterSpacing: '0.16em', fontWeight: 700, margin: '0 0 14px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
+      <section className="hp-how" style={{ padding: '72px 48px 0', maxWidth: '1120px', margin: '0 auto', textAlign: 'center' }}>
+        <p style={{ fontFamily: IT, fontSize: '0.78rem', color: GREEN, letterSpacing: '0.16em', fontWeight: 700, margin: '0 0 14px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
           <span style={{ display: 'inline-block', width: '30px', height: '2px', backgroundColor: '#b7bfa6' }} />
           HOW IT WORKS
           <span style={{ display: 'inline-block', width: '30px', height: '2px', backgroundColor: '#b7bfa6' }} />
@@ -319,11 +321,11 @@ export default function HomePage() {
       </section>
 
       {/* ── Steps ── */}
-      <section style={{ padding: '56px 48px 100px', maxWidth: '1120px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '72px' }}>
+      <section className="hp-steps" style={{ padding: '56px 48px 100px', maxWidth: '1120px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '72px' }}>
         {STEPS.map((step, i) => {
           const Illustration = STEP_ILLUSTRATIONS[i];
           return (
-            <div key={step.label} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '64px', alignItems: 'center' }}>
+            <div key={step.label} className="hp-step-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '64px', alignItems: 'center' }}>
               {/* Text */}
               <div>
                 <p style={{ fontFamily: IT, fontSize: '0.72rem', color: RUST, letterSpacing: '0.14em', fontWeight: 600, margin: '0 0 14px' }}>
@@ -354,15 +356,12 @@ export default function HomePage() {
       </section>
 
       {/* ── Bottom CTA band ── */}
-      <section style={{ backgroundColor: GREEN, padding: '80px 48px', textAlign: 'center' }}>
-        <h2 style={{ fontFamily: IS, fontSize: 'clamp(1.9rem, 3.2vw, 2.6rem)', color: '#f3efe3', fontWeight: 400, margin: '0 0 12px', lineHeight: 1.1 }}>
+      <section className="hp-cta" style={{ backgroundColor: GREEN, padding: '80px 48px', textAlign: 'center' }}>
+        <h2 style={{ fontFamily: IS, fontSize: 'clamp(1.9rem, 3.2vw, 2.6rem)', color: '#f3efe3', fontWeight: 400, margin: '0 0 32px', lineHeight: 1.1 }}>
           Ready to see your yard, reimagined?
         </h2>
-        <p style={{ fontFamily: IT, fontSize: '0.92rem', color: 'rgba(243,239,227,0.72)', margin: '0 0 28px' }}>
-          Start with your address — your first draft is free.
-        </p>
-        <button onClick={startPlan}
-          style={{ fontFamily: IT, fontSize: '0.92rem', fontWeight: 500, color: DARK, backgroundColor: '#ece6d8', border: 'none', borderRadius: '100px', padding: '14px 32px', cursor: 'pointer', boxShadow: '0 6px 20px rgba(0,0,0,0.14)' }}>
+        <button onClick={startPlan} className="transition-all hover:opacity-90"
+          style={{ fontFamily: IT, fontSize: '0.88rem', fontWeight: 500, color: DARK, background: 'white', border: '1.5px solid rgba(42,42,38,0.16)', borderRadius: '100px', padding: '12px 24px', cursor: 'pointer' }}>
           Design my yard
         </button>
       </section>
@@ -372,11 +371,14 @@ export default function HomePage() {
         .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder {
           box-shadow: none !important; border: none !important; border-radius: 0 !important;
           background: transparent !important; min-height: unset !important; width: 100% !important;
+          /* The geocoder box sits ~8px shy of centre (a line-box below its input); nudge it to align
+             with the pin icon. */
+          position: relative !important; top: 4px !important;
         }
         .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder input {
           font-family: 'Inter Tight', sans-serif !important; font-size: 0.88rem !important;
-          color: #1a1a16 !important; padding: 0 4px !important; height: 42px !important;
-          line-height: 42px !important; background: transparent !important; min-width: 0 !important;
+          color: #1a1a16 !important; padding: 0 4px !important; height: 36px !important;
+          line-height: 36px !important; background: transparent !important; min-width: 0 !important;
         }
         .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder input::placeholder { color: #a0a090 !important; }
         .hero-address-wrapper .canopy-geocoder .mapboxgl-ctrl-geocoder--icon-search { display: none !important; }
@@ -393,7 +395,42 @@ export default function HomePage() {
         .hero-address-wrapper .canopy-geocoder .suggestions > li > a:hover {
           background-color: #f0ece3 !important; color: #1a1a16 !important;
         }
+
+        /* ── Mobile: stack everything to one column and tighten gutters ── */
+        @media (max-width: 768px) {
+          .hp-header { padding: 16px 20px !important; }
+          .hp-hero { grid-template-columns: 1fr !important; gap: 30px !important; padding: 24px 20px 52px !important; }
+          .hp-hero-illo { justify-content: center !important; }
+          .hp-how { padding: 44px 20px 0 !important; }
+          .hp-steps { padding: 40px 20px 68px !important; gap: 52px !important; }
+          .hp-step-row { grid-template-columns: 1fr !important; gap: 26px !important; }
+          .hp-cta { padding: 60px 24px !important; }
+        }
       `}</style>
+
+      {/* ── Mobile gate: the design flow needs a bigger screen ── */}
+      {showMobileGate && (
+        <div onClick={() => setShowMobileGate(false)}
+          style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(26,26,22,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
+          <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true"
+            style={{ background: '#f6f1e6', borderRadius: '24px', padding: '34px 28px 28px', maxWidth: '384px', width: '100%', textAlign: 'center', boxShadow: '0 24px 70px rgba(26,26,22,0.32)' }}>
+            <svg width="46" height="46" viewBox="0 0 24 24" fill="none" style={{ margin: '0 auto 18px', display: 'block' }} aria-hidden>
+              <rect x="3" y="4" width="18" height="12.5" rx="2" stroke={GREEN} strokeWidth="1.7" />
+              <path d="M8.5 20h7M12 16.5V20" stroke={GREEN} strokeWidth="1.7" strokeLinecap="round" />
+            </svg>
+            <h3 style={{ fontFamily: IS, fontSize: '1.55rem', color: DARK, fontWeight: 400, margin: '0 0 12px', lineHeight: 1.2 }}>
+              Best on a bigger screen
+            </h3>
+            <p style={{ fontFamily: IT, fontSize: '0.95rem', color: MUTED, lineHeight: 1.6, margin: '0 0 24px' }}>
+              Designing your yard means drawing on a map and fine-tuning a detailed plan — it needs more room than a phone can give. Open canopy on a laptop or desktop to start your design.
+            </p>
+            <button onClick={() => setShowMobileGate(false)}
+              style={{ fontFamily: IT, fontSize: '0.9rem', fontWeight: 500, color: BG, background: DARK, border: 'none', borderRadius: '100px', padding: '12px 28px', cursor: 'pointer' }}>
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

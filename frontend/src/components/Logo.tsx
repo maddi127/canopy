@@ -1,3 +1,5 @@
+import { GREEN } from '../lib/theme';
+
 export default function Logo() {
   return (
     <>
@@ -9,7 +11,7 @@ export default function Logo() {
           position: absolute;
           left: 0; right: 0; bottom: 0;
           height: 6px;
-          border-bottom: 1.5px solid #2F5D3A;
+          border-bottom: 1.5px solid ${GREEN};
           border-radius: 50%;
         }
       `}</style>

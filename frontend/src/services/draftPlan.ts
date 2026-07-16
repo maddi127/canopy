@@ -5,6 +5,8 @@
 import { generateLayout } from './layoutGenerator';
 import { sunMapForSite, type SunMap } from './sunAnalysis';
 import { inputSignature } from '../lib/planSignature';
+import { snapshotPlanInputs } from '../lib/planInputs';
+import { GENERATOR_VERSION } from './designPayload';
 import type { ConfirmedFeature } from '../pages/DiyFeatureConfirmPage';
 
 export type Ring = [number, number][];
@@ -97,6 +99,8 @@ export function generateDraftPlan(seed = 1): DraftPlan | null {
     localStorage.setItem('diyPlacementPlan', json);
     localStorage.setItem('diyPlacementPlanOriginal', json);
     localStorage.setItem('diyPlacementPlanSig', inputSignature());
+    localStorage.setItem('diyPlanGeneratorVersion', GENERATOR_VERSION); // pin the version this plan was generated with
+    snapshotPlanInputs(); // baseline for "return to my previous draft" (RegenPrompt discard)
   } catch { /* quota */ }
 
   return { zones, beds, paths: plan.paths, primary: plan.primary, boundary: boundaryFt, boundaryLngLat: boundary, sunMap: sun };

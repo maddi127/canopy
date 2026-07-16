@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { GoogleMap, useJsApiLoader, Polygon } from '@react-google-maps/api';
 import Logo from '../components/Logo';
+import BackButton from '../components/BackButton';
 import { runDiyPlantPlacement, type DiyPlantPlan, type BedRole } from '../services/diyPlantPlacementService';
 import { fetchHardinessZone } from '../features/sun/hardinessZone';
 import { getPlantDatabase } from '../services/plantDatabaseAdapter';
@@ -11,8 +12,9 @@ import type { ConfirmedFeature } from './DiyFeatureConfirmPage';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
+import { IT, PAGE_BG } from '../lib/theme';
+
 const GOOGLE_MAPS_KEY = (import.meta as any).env?.VITE_GOOGLE_MAPS_KEY ?? '';
-const IT = "'Inter Tight', sans-serif";
 
 const ROLE_LABELS: Record<BedRole, string> = {
   foundation:      'Foundation',
@@ -224,7 +226,7 @@ export default function DiyPlantSelectPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center" style={{ backgroundColor: '#efe9db' }}>
+      <div className="min-h-screen flex flex-col items-center justify-center" style={{ backgroundColor: PAGE_BG }}>
         <div style={{ fontFamily: IT, fontSize: '0.9rem', color: '#6A6A60' }}>Building your plant plan…</div>
         <div style={{ marginTop: 16, width: 32, height: 32, borderRadius: '50%', border: '3px solid #2A2A26', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite' }} />
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
@@ -234,7 +236,7 @@ export default function DiyPlantSelectPage() {
 
   if (error || !plan) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-4" style={{ backgroundColor: '#efe9db' }}>
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4" style={{ backgroundColor: PAGE_BG }}>
         <div style={{ fontFamily: IT, fontSize: '0.9rem', color: '#9A4A3A' }}>{error ?? 'Something went wrong.'}</div>
         <button onClick={() => navigate('/diy/boundary')}
           style={{ fontFamily: IT, fontSize: '0.85rem', color: '#2A2A26', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
@@ -247,7 +249,7 @@ export default function DiyPlantSelectPage() {
   // ── Main render ───────────────────────────────────────────────────────────────
 
   return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', backgroundColor: '#efe9db' }}>
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', backgroundColor: PAGE_BG }}>
 
       {/* LEFT PANEL */}
       <div style={{ width: 380, display: 'flex', flexDirection: 'column', overflow: 'hidden', flexShrink: 0 }}>
@@ -454,10 +456,7 @@ export default function DiyPlantSelectPage() {
           borderTop: '1px solid rgba(42,42,38,0.08)',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
-          <button onClick={() => navigate('/diy/boundary')}
-            style={{ fontFamily: IT, fontSize: '0.8rem', color: '#9A9A92', background: 'none', border: 'none', cursor: 'pointer' }}>
-            ← Back
-          </button>
+          <BackButton onClick={() => navigate('/diy/boundary')} />
           <button onClick={() => navigate('/diy/plan-reveal')}
             style={{
               fontFamily: IT, fontSize: '0.85rem', fontWeight: 500,
@@ -563,7 +562,7 @@ export default function DiyPlantSelectPage() {
 function Chip({ label, accent }: { label: string; accent?: boolean }) {
   return (
     <span style={{
-      fontFamily: "'Inter Tight', sans-serif", fontSize: '0.65rem', fontWeight: 500,
+      fontFamily: IT, fontSize: '0.65rem', fontWeight: 500,
       borderRadius: 999, padding: '2px 7px',
       background: accent ? 'rgba(74,124,89,0.14)' : 'rgba(42,42,38,0.07)',
       color:      accent ? '#2A6A3A'              : '#6A6A60',

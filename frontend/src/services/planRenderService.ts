@@ -4,12 +4,19 @@
 // design style — and asks for a ground-level, human-eye visualization of that exact layout.
 import { supabase } from '../lib/supabase';
 
-const GEMINI_API_KEY = (import.meta as any).env?.VITE_GEMINI_API_KEY || '';
+// Dev-only key: the import.meta.env.DEV gate lets Vite strip the key and the
+// direct-to-Google branch out of production bundles entirely.
+const GEMINI_API_KEY = import.meta.env.DEV ? (import.meta.env.VITE_GEMINI_API_KEY || '') : '';
 const IMAGE_MODEL = 'gemini-2.5-flash-image';
 // Same routing as geminiService: direct in dev (client key set), Netlify proxy in production.
-const IMAGE_API_URL = GEMINI_API_KEY
+const IMAGE_API_URL = import.meta.env.DEV && GEMINI_API_KEY
   ? `https://generativelanguage.googleapis.com/v1beta/models/${IMAGE_MODEL}:generateContent`
   : `/.netlify/functions/gemini?model=${IMAGE_MODEL}`;
+// The key header only exists on the dev direct path — never sent to the proxy.
+const GEMINI_HEADERS: Record<string, string> =
+  import.meta.env.DEV && GEMINI_API_KEY
+    ? { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY }
+    : { 'Content-Type': 'application/json' };
 
 const STYLE_LABELS: Record<string, string> = {
   natural_wild: 'whimsical wildflower-cottage garden',
@@ -37,7 +44,7 @@ async function generateImage(prompt: string, imageDataUrls: string[]): Promise<s
   };
   const res = await fetch(IMAGE_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Gemini API error ${res.status}: ${await res.text()}`);

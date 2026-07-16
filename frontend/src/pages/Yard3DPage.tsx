@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Yard3D from '../components/Yard3D';
-
-const IT = "'Inter', system-ui, sans-serif";
+import BackButton from '../components/BackButton';
+import { IT } from '../lib/theme';
 
 interface HouseAttrs { stories: number; style: string; material: string; color: string; }
 const DEFAULT_ATTRS: HouseAttrs = { stories: 1, style: 'ranch', material: 'stucco', color: '#D8D2C4' };
@@ -49,10 +49,8 @@ export default function Yard3DPage() {
         </div>
       </div>
 
-      <button onClick={() => navigate('/diy/plant-options')}
-        style={{ position: 'absolute', top: 20, left: 24, background: 'rgba(255,255,255,0.92)', color: '#2A2A26', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', borderRadius: 999, padding: '9px 18px', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.15)' }}>
-        ← back
-      </button>
+      <BackButton onClick={() => navigate('/diy/plant-options')}
+        style={{ position: 'absolute', top: 20, left: 24 }} />
 
       {/* House control panel */}
       <div style={{ position: 'absolute', top: 20, right: 24, width: 250, background: 'rgba(255,255,255,0.95)', borderRadius: 16, boxShadow: '0 4px 18px rgba(0,0,0,0.16)', overflow: 'hidden' }}>

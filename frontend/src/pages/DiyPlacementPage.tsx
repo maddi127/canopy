@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, Fragment } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { GoogleMap, useJsApiLoader, Polygon } from '@react-google-maps/api';
 import * as turf from '@turf/turf';
@@ -11,14 +11,19 @@ import { designProgress, DESIGN_STEP_TITLE } from '../lib/designProgress';
 import type { ConfirmedFeature } from './DiyFeatureConfirmPage';
 import {
   selectTrees, selectLayer, mapStyle, STYLE_TOTAL_SPECIES, LAYER_SPECIES_TARGET,
-  PLANT_PACKING_EFFICIENCY, LAYER_QTY_PER_SPECIES, canopyFootprintFt, placePlan, isUnderPlanting,
+  PLANT_PACKING_EFFICIENCY, LAYER_QTY_PER_SPECIES, canopyFootprintFt, placePlan,
   TREE_CANOPY_COVERAGE_GOAL, SHADE_CANOPY_COVERAGE_GOAL, plantSunCats,
-  plantCapacity, cloneCapacity, pocketFits, consumePocket, densityParams,
+  plantCapacity, cloneCapacity, pocketFits, consumePocket, densityParams, plantableStats,
   type Layer, type TreeSelection, type LayerSelection, type SpeciesCandidate, type SunCat, type PlantCapacity,
 } from '../services/plantSelectionService';
+import { buildPlantSlots, type PlantSlot } from '../services/plantSlots';
+import BackButton from '../components/BackButton';
 import { fetchHardinessZone } from '../features/sun/hardinessZone';
 import { bloomColorFor } from '../lib/plantColors';
 import { buildPlantClusters, paintPlantClusters, paintSketchFeaturePoly, paintSketchGroundFill, paintLawnMowerArcs, paintPathEdges, paintPathBody } from '../lib/planPainter';
+import { useAutosave } from '../hooks/useAutosave';
+import SaveStatusChip from '../components/SaveStatusChip';
+import { IS, IT, HAND, INK, GREEN } from '../lib/theme';
 
 // ── Plant-step grouping + formatting (ported from /plant-options, matched to this layout) ──
 // Species budget → per-layer counts, weighted toward the matrix (shrubs/groundcover).
@@ -46,13 +51,13 @@ const LAYER_INFO: Record<Layer, { label: string; sub: string }> = {
   tree:        { label: 'Trees',        sub: 'Canopy & shade' },
   large_shrub: { label: 'Large shrubs', sub: 'Structure & screening (6 ft +)' },
   shrub:       { label: 'Shrubs',       sub: 'Medium & small, filling in' },
-  groundcover: { label: 'Groundcover',  sub: 'Low plants that knit it together' },
+  groundcover: { label: 'Filler plant',  sub: 'Low plants that knit it together' },
 };
 // The three groups shown in the toolbar.
 const PLANT_GROUPS: { title: string; sub: string; layers: Layer[] }[] = [
   { title: 'Visual interest plants', sub: 'Trees and large shrubs — the structure everything builds around.', layers: ['tree', 'large_shrub'] },
   { title: 'Foundation plants',      sub: 'Medium and small shrubs that fill in between.', layers: ['shrub'] },
-  { title: 'Groundcovers',           sub: 'Low, spreading plants that tie the beds together.', layers: ['groundcover'] },
+  { title: 'Filler plants',          sub: 'Low, spreading plants that tie the beds together.', layers: ['groundcover'] },
 ];
 const THUMB_KIND: Record<Layer, 'trees' | 'large_shrub' | 'small_shrub' | 'groundcover'> = {
   tree: 'trees', large_shrub: 'large_shrub', shrub: 'small_shrub', groundcover: 'groundcover',
@@ -91,9 +96,28 @@ const PLANT_SPECIES_PALETTE = ['#3d5c3a', '#6a9460', '#4a7a50', '#8aa06a', '#5c8
 const SUN_CATS: SunCat[] = ['full', 'part', 'shade'];
 const SUN_CAT_LABEL: Record<SunCat, string> = { full: 'Full sun', part: 'Part sun', shade: 'Shade' };
 
-const IT = "'Inter Tight', sans-serif";
-const IS = "'Instrument Serif', serif";
-const HAND = "'Caveat', cursive"; // hand-lettered labels on the illustrated plan
+
+// ── Shared sidebar primitives (visual consistency across Features / Details / Plants) ────────────
+// One card shell, one disclosure chevron, one uppercase control-group label, one dashed "add" row,
+// and one selected-state treatment — so every editor section reads as the same system.
+const cardShell = (open = false): React.CSSProperties => ({
+  border: `1.5px solid ${open ? 'rgba(42,42,38,0.35)' : 'rgba(42,42,38,0.12)'}`,
+  borderRadius: 12, background: 'white', overflow: 'hidden',
+});
+const CARD_TITLE: React.CSSProperties = { fontFamily: IT, fontSize: '0.9rem', fontWeight: 600, color: '#2A2A26' };
+const CARD_SUMMARY: React.CSSProperties = { fontFamily: IT, fontSize: '0.72rem', color: '#9A9A92', flexShrink: 0, textAlign: 'right', marginLeft: 'auto' };
+const GROUP_LABEL: React.CSSProperties = { fontFamily: IT, fontSize: '0.72rem', color: '#9A9A92', textTransform: 'uppercase', letterSpacing: '0.09em', fontWeight: 600 };
+const ADD_ROW: React.CSSProperties = { background: 'rgba(42,42,38,0.03)', border: '1.5px dashed rgba(42,42,38,0.2)', cursor: 'pointer', color: '#7A7A6E', fontFamily: IT, fontSize: '0.78rem', fontWeight: 500 };
+// Selected list item / card: cream fill + dark 2px ring (used for selected feature, path, species).
+const selShell = (on: boolean): React.CSSProperties => ({
+  background: on ? '#F4F0E6' : 'rgba(42,42,38,0.05)',
+  border: on ? '2px solid #2A2A26' : '2px solid transparent',
+});
+// The summary span (CARD_SUMMARY) carries margin-left:auto and pushes right; the chevron sits flush
+// after it — so it must NOT also take auto margin, or the free space splits and a gap opens up.
+const Chevron = ({ open }: { open: boolean }) => (
+  <span style={{ fontFamily: IT, fontSize: '1rem', color: '#9A9A92', flexShrink: 0, display: 'inline-block', lineHeight: 1, transition: 'transform 0.15s ease', transform: open ? 'rotate(90deg)' : 'none' }}>›</span>
+);
 const GOOGLE_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY || '';
 const PAD = 56;
 
@@ -172,7 +196,7 @@ function placementReason(key: string, _label: string, near: boolean): string {
     case 'cooking': return near
       ? `Placed near the house for convenient cooking. Alternatively, it could become a destination at the far end of the yard.`
       : `Placed as a destination at the far end of the yard. Alternatively, it could tuck into a corner nearer the house.`;
-    case 'water': return `Placed as a focal point beside the seating. Alternatively, it could anchor a quieter corner of the yard.`;
+    case 'water': return `Placed as a focal point in the yard. Alternatively, it could anchor a quieter corner.`;
     case 'garden': return `Placed in an open, sunny spot away from the shade of the house and big trees.`;
     case 'storage': return `Tucked into the least visible corner. Alternatively, it could sit closer to the house for convenience.`;
     case 'lawn': return `Shaped as a large, central open space. Alternatively, it could shift toward the house or hug one side.`;
@@ -198,6 +222,44 @@ const STEP_TITLE: Record<StepId, string> = {
   lawn:        'Lawn',
   review:      'Review your plan',
 };
+
+// First-run editor tour: a short walkthrough shown once (per browser) the first time a design opens in
+// the guided editor. Step 0 is the existing sun-map explanation; the rest introduce the editable layers
+// and open the sidebar section they describe (sidebarStep) so the user sees the controls in question.
+type OnboardStep = { key: string; eyebrow: string; title: string; intro: string; intro2?: string; bullets: { icon: string; text: string }[]; sidebarStep?: StepId; };
+const ONBOARD_STEPS: OnboardStep[] = [
+  {
+    key: 'sun', eyebrow: 'Before you dig in', title: 'We analyzed your sunlight',
+    intro: 'Using your home, trees, and structures, we modeled how the sun moves across your yard:',
+    bullets: [],
+  },
+  {
+    key: 'features', eyebrow: 'Getting around', title: 'Everything starts with your features',
+    intro: "We've placed your features based on landscape design principles, but now it's time to make it your own.",
+    intro2: 'Click any feature to open and edit it. Move it, resize it, change its shape, or rotate it to your liking.',
+    bullets: [],
+    sidebarStep: 'features',
+  },
+  {
+    key: 'details', eyebrow: 'Getting around', title: 'Fill in the details',
+    intro: 'Start with your groundcover — the material that fills the open ground — then add the finishing touches.',
+    bullets: [
+      { icon: '🪨', text: 'Pick a primary groundcover (mulch or stone) for the whole yard.' },
+      { icon: '🚶', text: 'Add walkways and dry creek beds by clicking points on the plan.' },
+      { icon: '✏️', text: 'Draw accent beds wherever you want extra planting — we’ll fill them with plants suited to that spot’s sun.' },
+    ],
+    sidebarStep: 'details',
+  },
+  {
+    key: 'plants', eyebrow: 'Getting around', title: 'Choose your plants',
+    intro: "We chose plants suited to your yard's sun, hardiness zone, and style — the last step is making them yours.",
+    bullets: [
+      { icon: '🔁', text: 'Swap or add species in any group, and dial plant density up or down.' },
+      { icon: '👆', text: 'Click a plant on the plan to jump straight to it in the list.' },
+    ],
+    sidebarStep: 'plants',
+  },
+];
 
 // What the user wants screened: a boundary edge, or the area around a placed feature.
 type PrivacyTarget = { kind: 'edge'; edgeIndex: number } | { kind: 'feature'; featureId: string };
@@ -762,6 +824,10 @@ function closeRingPts(pts: Ring): Ring | null {
 export default function DiyPlacementPage({ illustrative = false }: { illustrative?: boolean } = {}) {
   const navigate = useNavigate();
 
+  // Debounced autosave of the active design row. Idle (zero DB writes) for
+  // anonymous users and until a design is adopted; drives the save-status chip.
+  const saveStatus = useAutosave();
+
   // ── Data ────────────────────────────────────────────────────────────────────
   const saved = useMemo(() => { try { return JSON.parse(localStorage.getItem('diyBoundaryFinal') || '{}'); } catch { return {}; } }, []);
   const prefs = useMemo(() => { try { return JSON.parse(localStorage.getItem('userPreferences')  || '{}'); } catch { return {}; } }, []);
@@ -1089,7 +1155,15 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
     const uw = (umaxX - uminX) || 1, uh = (umaxY - uminY) || 1, k = 0.6;
     const txB = (cssSize.w - s * rw) / 2 - s * rminX, tyB = (cssSize.h - s * T * rh) / 2 - s * T * rminY;
     const txU = (cssSize.w - s * uw) / 2 - s * uminX, tyU = (cssSize.h - s * T * uh) / 2 - s * T * uminY;
-    const tx = txB + (txU - txB) * k, ty = tyB + (tyU - tyB) * k;
+    let tx = txB + (txU - txB) * k, ty = tyB + (tyU - tyB) * k;
+    // Keep the ENTIRE project boundary in frame: clamp the mass-blended shift so the boundary's scaled
+    // bbox never leaves the viewport. When the house is large (e.g. a front yard), it crops off-view
+    // instead of pushing the boundary's far edge out of sight. (pixel_x = s·rx + tx; pixel_y = T·s·ry + ty.)
+    const pad = 0.03 * Math.min(cssSize.w, cssSize.h);
+    const loTx = pad - s * rminX, hiTx = cssSize.w - pad - s * rmaxX;
+    const loTy = pad - s * T * rminY, hiTy = cssSize.h - pad - s * T * rmaxY;
+    if (loTx <= hiTx) tx = Math.min(Math.max(tx, loTx), hiTx);
+    if (loTy <= hiTy) ty = Math.min(Math.max(ty, loTy), hiTy);
     return {
       a: s * cosT,     c: -s * sinT,    e: tx - s * cosT * cx + s * sinT * cy,
       b: T * s * sinT, d: T * s * cosT, f: ty - T * s * sinT * cx - T * s * cosT * cy,
@@ -1160,20 +1234,27 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   // Sun layer: toggleable on the grid via the "Sun layer" button. Introduced by a one-time onboarding
   // popup (anchored to that button) the first time the user reaches feature placement.
   const [showSun, setShowSun] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false); // "Reset plan" confirmation screen
   const showSunRef = useRef(false);
   useEffect(() => { showSunRef.current = showSun; }, [showSun]);
-  const [sunOnboard, setSunOnboard] = useState(false);
+  // First-run editor tour (see ONBOARD_STEPS). onboardIdx = -1 means the tour isn't running; 0..N-1
+  // walks the steps. The sun-specific chrome (heatmap + button highlight) keys off the sun step.
+  const [onboardIdx, setOnboardIdx] = useState(-1);
+  const inTour = onboardIdx >= 0;
+  const onboardStep = inTour ? ONBOARD_STEPS[onboardIdx] : null;
+  const sunOnboard = onboardStep?.key === 'sun';
   useEffect(() => {
     if (!illustrative || !sunMap) return;
-    if (localStorage.getItem('diySunInterstitialSeen') === '1') return;
-    setSunOnboard(true);
-    setShowSun(true); // reveal the heatmap while we explain it
+    if (localStorage.getItem('canopyEditorTourSeen') === '1') return;
+    setOnboardIdx(0); // opens on the sun step (the apply-effect below reveals the heatmap)
   }, [illustrative, sunMap]);
-  const dismissSunOnboard = useCallback(() => {
-    setSunOnboard(false);
+  const endTour = useCallback(() => {
+    setOnboardIdx(-1);
     setShowSun(false); // clean working view; the button re-enables the layer any time
-    try { localStorage.setItem('diySunInterstitialSeen', '1'); } catch { /* ignore */ }
+    try { localStorage.setItem('canopyEditorTourSeen', '1'); } catch { /* ignore */ }
   }, []);
+  const nextOnboard = useCallback(() => setOnboardIdx(i => (i < 0 ? i : i >= ONBOARD_STEPS.length - 1 ? (endTour(), -1) : i + 1)), [endTour]);
+  const backOnboard = useCallback(() => setOnboardIdx(i => (i > 0 ? i - 1 : i)), []);
 
   // Measure synchronously before the first paint so the plan renders at the real size immediately —
   // otherwise it draws at the 900×600 default, then the ResizeObserver snaps it (a visible pulse).
@@ -1217,6 +1298,10 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   // the shared plan painter dims every other species. Toggling the same name (or null) clears it.
   const [selSpecies,     setSelSpecies]     = useState<string | null>(null);
   const toggleSpecies = useCallback((name: string | null) => setSelSpecies(cur => (name && cur === name) ? null : name), []);
+  // A single visual-interest plant (tree / large shrub) selected on the map — shows a move handle and can
+  // be dragged to reposition (e.g. off a utility). Other plant layers are spotlight-only.
+  const [selectedPlantId, setSelectedPlantId] = useState<string | null>(null);
+  const selPlantRef = useRef<string | null>(null);
   // Guided (auto-layout) stepper: which placed feature we're walking through.
   const [guideIdx,       setGuideIdx]       = useState(-1);   // no feature card auto-expanded on landing
 
@@ -1224,7 +1309,12 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   const selRef      = useRef<string | null>(null);
   const guideZonesRef = useRef<PlacedZone[]>([]); // mirror of guideZones → clicking a feature opens its card
   const selSpeciesRef = useRef<string | null>(null); // mirror of selSpecies for the imperative draw()
-  const plantSlotsRef = useRef<{ id: string; r: number; name: string }[]>([]); // for the plan click hit-test
+  const plantSlotsRef = useRef<{ id: string; r: number; name: string; layer: Layer }[]>([]); // for the plan click hit-test (layer → which sidebar group to open)
+  // Clicking a plant on the plan jumps to the Plants step and spotlights its species: this ref holds
+  // the species name whose sidebar card should scroll into view once the step (re)renders, and the
+  // map of species → card element to scroll to.
+  const pendingPlantScrollRef = useRef<string | null>(null);
+  const plantCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const ghostRef    = useRef<{ item: ToolbarItem; cx: number; cy: number } | null>(null);
   const scaleRef    = useRef(scale);
   const ftToPxRef   = useRef(ftToPx);
@@ -1466,7 +1556,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
           ctx.font = `600 ${Math.round(fs * 1.5)}px ${HAND}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
           const label = r.label.charAt(0).toUpperCase() + r.label.slice(1);
           ctx.lineWidth = 3.5; ctx.strokeStyle = 'rgba(247,243,234,0.92)'; ctx.lineJoin = 'round'; ctx.strokeText(label, 0, 0);
-          ctx.fillStyle = '#40392e'; ctx.fillText(label, 0, 0);
+          ctx.fillStyle = INK; ctx.fillText(label, 0, 0);
         } else {
           ctx.fillStyle = '#FFFFFF'; ctx.font = `600 ${fs}px ${IT}`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -1683,6 +1773,35 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
       }
     }
 
+    // Selected visual-interest plant → dashed selection ring + a move-handle badge (drag to reposition).
+    if (illustrative && selPlantRef.current) {
+      const pp = plantPositionsRef.current[selPlantRef.current];
+      const slot = plantSlotsRef.current.find(s => s.id === selPlantRef.current);
+      if (pp && slot) {
+        const [px, py] = ftToPxRef.current(pp.x, pp.y);
+        const rPx = Math.max(15, slot.r * scaleRef.current);
+        ctx.save();
+        ctx.beginPath(); ctx.arc(px, py, rPx + 4, 0, Math.PI * 2);
+        ctx.strokeStyle = '#2A2A26'; ctx.lineWidth = 2; ctx.setLineDash([5, 3]); ctx.stroke();
+        ctx.setLineDash([]);
+        // Move badge above the plant with a 4-arrow glyph.
+        const bx = px, by = py - rPx - 15;
+        ctx.beginPath(); ctx.arc(bx, by, 11, 0, Math.PI * 2);
+        ctx.fillStyle = '#2A2A26'; ctx.fill();
+        ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 1.4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        const a = 5, h = 2.3;
+        ctx.beginPath();
+        ctx.moveTo(bx, by - a); ctx.lineTo(bx, by + a);
+        ctx.moveTo(bx - a, by); ctx.lineTo(bx + a, by);
+        ctx.moveTo(bx - h, by - a + h); ctx.lineTo(bx, by - a); ctx.lineTo(bx + h, by - a + h);
+        ctx.moveTo(bx - h, by + a - h); ctx.lineTo(bx, by + a); ctx.lineTo(bx + h, by + a - h);
+        ctx.moveTo(bx - a + h, by - h); ctx.lineTo(bx - a, by); ctx.lineTo(bx - a + h, by + h);
+        ctx.moveTo(bx + a - h, by - h); ctx.lineTo(bx + a, by); ctx.lineTo(bx + a - h, by + h);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
     // Editable vertex handles for the selected organic zone.
     const selZone = zones.find(z => z.id === selId);
     if (selZone?.verts && selZone.verts.length >= 3) {
@@ -1859,6 +1978,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
 
   // Mirror the species highlight into its ref and repaint (draw reads the ref, like the sun layer).
   useEffect(() => { selSpeciesRef.current = selSpecies; draw(); }, [selSpecies, draw]);
+  useEffect(() => { selPlantRef.current = selectedPlantId; draw(); }, [selectedPlantId, draw]);
 
   // Size + draw the editing canvas BEFORE paint so the plan is present on the first frame (no
   // blank flash / jump when the auto-layout page mounts after the reveal hand-off).
@@ -1934,6 +2054,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
     origW:     number; origH:   number;
     origVerts?: [number, number][];
   } | null>(null);
+  const plantDragRef = useRef<{ id: string } | null>(null); // dragging a selected visual-interest plant
 
   // ── Hit test ─────────────────────────────────────────────────────────────────
   const hitTest = useCallback((mx: number, my: number): {
@@ -1949,9 +2070,9 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
     };
     for (let i = zones.length - 1; i >= 0; i--) {
       const z = zones[i];
-      // Guided (illustrative) mode: only the active feature is interactive — you can move/resize the
-      // one you're on, but clicks elsewhere don't grab other features.
-      if (illustrative && z.id !== sel) continue;
+      // Guided (illustrative) mode: ANY zone is hit-testable so a click can select it and open its
+      // card. The edit HANDLES (rotate/resize/vertex/edge) below stay gated on `z.id === sel`, so a
+      // non-active zone only ever yields a plain `move` (i.e. select) — never a stray handle grab.
 
       // Rotate handle (active feature, illustrative) takes priority over move/resize.
       if (illustrative && z.id === sel && z.key !== undefined && !z.verts) {
@@ -2053,10 +2174,36 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
     return null;
   }, []);
 
+  // Nearest placed plant to a click, in feet space — the species name + layer of the slot the cursor
+  // is over (within max(rFt, 2.5 ft)), else null. Used to spotlight a species from a click on the plan
+  // (the layer says which sidebar plant-group to expand so its card renders and can scroll into view).
+  const hitPlant = useCallback((mx: number, my: number): { id: string; name: string; layer: Layer; r: number } | null => {
+    const [pfx, pfy] = pxToFtRef.current(mx, my);
+    let best: { id: string; name: string; layer: Layer; r: number } | null = null, bestD = Infinity;
+    for (const s of plantSlotsRef.current) {
+      const pp = plantPositionsRef.current[s.id]; if (!pp) continue;
+      const dd = Math.hypot(pp.x - pfx, pp.y - pfy);
+      if (dd <= Math.max(s.r, 2.5) && dd < bestD) { bestD = dd; best = { id: s.id, name: s.name, layer: s.layer, r: s.r }; }
+    }
+    return best;
+  }, []);
+
   const getPos = (e: React.MouseEvent): [number, number] => {
     const r = canvasRef.current!.getBoundingClientRect();
     return [e.clientX - r.left, e.clientY - r.top];
   };
+
+  // One-at-a-time selection: clear EVERY on-map selection — feature zones, beds, detected features,
+  // walkways, and the plant spotlight. Each selection branch below calls this first and then sets its
+  // own, so selecting anything unselects everything else across all categories.
+  const clearAllSelections = useCallback(() => {
+    selRef.current = null; setSelectedId(null);
+    selBedRef.current = null; setSelectedBedId(null);
+    selFeatRef.current = null; setSelectedFeatureId(null);
+    setSelectedPathId(null);
+    setSelSpecies(null);
+    selPlantRef.current = null; setSelectedPlantId(null);
+  }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const [mx, my] = getPos(e);
@@ -2161,10 +2308,8 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
         if (segClosestPx(mx, my, ax, ay, bx, by).dist <= w) near = true;
       }
       if (near) {
+        clearAllSelections();
         setSelectedPathId(p.id);
-        selRef.current = null; setSelectedId(null);
-        selBedRef.current = null; setSelectedBedId(null);
-        selFeatRef.current = null; setSelectedFeatureId(null);
         return;
       }
     }
@@ -2190,10 +2335,54 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
       }
     }
 
-    // Features are selectable/editable on the features step. In the guided (illustrative) editor a
-    // click on a feature from any OTHER step also jumps to the features step and opens that feature's
-    // card — except on the plants step, where a click spotlights a plant species instead.
-    const featuresClickable = illustrative ? openStepRef.current !== 'plants' : openStepRef.current === 'features';
+    // The currently-selected bed or feature owns its own body + resize/rotate handles: if the pointer is
+    // on the ALREADY-selected item, act on it before the plant spotlight can steal the click. Without
+    // this, a plant marker overlapping your selected bed makes "move/resize" select the plant instead.
+    // Only the selected item gets this priority; unselected items still yield to plants below.
+    const grabSelBed = illustrative && selBedRef.current ? hitTestBed(mx, my) : null;
+    if (grabSelBed && grabSelBed.bed.id === selBedRef.current) {
+      bedDragRef.current = {
+        kind: grabSelBed.part, bedId: grabSelBed.bed.id,
+        startMx: mx, startMy: my,
+        origX: grabSelBed.bed.xFt, origY: grabSelBed.bed.yFt,
+        origW: grabSelBed.bed.wFt, origH: grabSelBed.bed.hFt,
+        origVerts: grabSelBed.bed.verts ? [...grabSelBed.bed.verts] : undefined,
+      };
+      return;
+    }
+    // Same for a selected feature zone: if the pointer is on it, skip the plant check and fall through to
+    // the zone-handling below (which starts the move/resize/vertex/rotate drag for that zone).
+    const onSelZone = illustrative && selRef.current ? hitTest(mx, my) : null;
+    const grabSelZone = !!onSelZone && onSelZone.zone.id === selRef.current;
+
+    // Precedence, topmost first: a click landing directly on a placed plant marker jumps to the Plants
+    // step and spotlights that species — from ANY step — and WINS over the feature zone / bed beneath it
+    // (plants sit on top; hitPlant is a precise radius test, so a null result means the cursor wasn't on
+    // a plant and we fall through to feature/bed selection).
+    const plant = (illustrative && !grabSelZone) ? hitPlant(mx, my) : null;
+    if (plant) {
+      clearAllSelections();
+      if (openStepRef.current !== 'plants') setOpenStep('plants');
+      // Expand the sidebar plant-group that holds this layer, else its card stays collapsed (unmounted)
+      // and can't be highlighted or scrolled to.
+      const gi = PLANT_GROUPS.findIndex(g => g.layers.includes(plant.layer));
+      if (gi >= 0) setPlantGroupOpen(gi);
+      setSelSpecies(plant.name);
+      pendingPlantScrollRef.current = plant.name;
+      // Visual-interest plants (trees + large shrubs) are individually movable: select THIS instance and
+      // arm a drag so the user can reposition it (e.g. off a utility). Other layers stay spotlight-only.
+      if (plant.layer === 'tree' || plant.layer === 'large_shrub') {
+        selPlantRef.current = plant.id; setSelectedPlantId(plant.id);
+        plantDragRef.current = { id: plant.id };
+      }
+      return;
+    }
+
+    // Feature zones are selectable/editable. In the guided (illustrative) editor a click on a feature
+    // from ANY step jumps to the Features step and opens that feature's card (the plant check above
+    // already peeled off plant clicks, incl. on the plants step). In the satellite editor, only on the
+    // features step.
+    const featuresClickable = illustrative ? true : openStepRef.current === 'features';
     const hit = featuresClickable ? hitTest(mx, my) : null;
     if (!hit) {
       // Guided mode: keep the active feature selected (its selection is driven by the stepper);
@@ -2201,10 +2390,8 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
       if (illustrative && openStepRef.current === 'features') return;
       const bedHit = hitTestBed(mx, my);
       if (bedHit) {
+        clearAllSelections();
         selBedRef.current = bedHit.bed.id; setSelectedBedId(bedHit.bed.id);
-        selRef.current = null; setSelectedId(null);
-        setSelectedPathId(null);
-        selFeatRef.current = null; setSelectedFeatureId(null);
         bedDragRef.current = {
           kind: bedHit.part, bedId: bedHit.bed.id,
           startMx: mx, startMy: my,
@@ -2219,39 +2406,20 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
       if (!illustrative) {
         const featHit = hitTestFeature(mx, my);
         if (featHit) {
+          clearAllSelections();
           selFeatRef.current = featHit.id; setSelectedFeatureId(featHit.id);
-          selRef.current = null; setSelectedId(null);
-          selBedRef.current = null; setSelectedBedId(null);
-          setSelectedPathId(null);
           const origVerts = featHit.verts.map(v => [...v] as [number, number]);
           featDragRef.current = { kind: 'move', featId: featHit.id, startMx: mx, startMy: my, origVerts, liveVerts: origVerts };
           return;
         }
       }
-      {
-        selRef.current = null; setSelectedId(null);
-        selBedRef.current = null; setSelectedBedId(null);
-        setSelectedPathId(null);
-        selFeatRef.current = null; setSelectedFeatureId(null);
-        // Lowest precedence, strictly additive: nothing geometric (zone/path/bed) was hit, so no drag
-        // begins here — safe to hit-test plant instances for the species spotlight. Linear-scan the
-        // slots in feet space; toggle the nearest within max(rFt, 2.5ft), or clear if the click missed.
-        const [pfx, pfy] = pxToFtRef.current(mx, my);
-        let bestName: string | null = null, bestD = Infinity;
-        for (const s of plantSlotsRef.current) {
-          const pp = plantPositionsRef.current[s.id]; if (!pp) continue;
-          const dd = Math.hypot(pp.x - pfx, pp.y - pfy);
-          if (dd <= Math.max(s.r, 2.5) && dd < bestD) { bestD = dd; bestName = s.name; }
-        }
-        toggleSpecies(bestName);
-      }
+      // Nothing geometric (zone/path/bed) and no plant was hit — clear every selection.
+      clearAllSelections();
       return;
     }
-    setSelectedPathId(null);
+    clearAllSelections();
     selRef.current = hit.zone.id;
     setSelectedId(hit.zone.id);
-    selBedRef.current = null; setSelectedBedId(null);
-    selFeatRef.current = null; setSelectedFeatureId(null);
     // Open the Features step + expand this feature's card so it's editable in the sidebar.
     if (illustrative) {
       if (openStepRef.current !== 'features') setOpenStep('features');
@@ -2286,7 +2454,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
       origW: hit.zone.wFt, origH: hit.zone.hFt,
       origVerts: hit.zone.verts ? hit.zone.verts.map(v => [v[0], v[1]] as [number, number]) : undefined,
     };
-  }, [hitTest, hitTestBed, hitTestFeature, hitTestFeatureHandle, pathDrawMode, pxToFt, buildPath, globalPathStyle, globalPathMaterial, toggleSpecies, draw]);
+  }, [hitTest, hitTestBed, hitTestFeature, hitTestFeatureHandle, hitPlant, clearAllSelections, pathDrawMode, pxToFt, buildPath, globalPathStyle, globalPathMaterial, draw]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const [mx, my]  = getPos(e);
@@ -2296,6 +2464,15 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
       if (canvasRef.current) canvasRef.current.style.cursor = 'crosshair';
       bedDrawCursorRef.current = pxToFtRef.current(mx, my);
       draw();
+      return;
+    }
+
+    // Dragging a selected visual-interest plant → it follows the cursor (updates its placed position live).
+    if (plantDragRef.current) {
+      const id = plantDragRef.current.id;
+      const [fx, fy] = pxToFtRef.current(mx, my);
+      setPlantPositions(prev => ({ ...prev, [id]: { x: fx, y: fy } }));
+      if (canvasRef.current) canvasRef.current.style.cursor = 'move';
       return;
     }
 
@@ -2401,6 +2578,21 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
 
   const handleMouseUp = useCallback(() => {
     if (addingBedRef.current?.step === 'draw') return; // finalised via onDoubleClick
+    if (plantDragRef.current) {
+      const movedId = plantDragRef.current.id;
+      plantDragRef.current = null;
+      // Remember this move (persisted) so it survives leaving and re-entering the editor.
+      const movedPos = plantPositionsRef.current[movedId];
+      if (movedPos) { plantOverridesRef.current = { ...plantOverridesRef.current, [movedId]: movedPos }; persistPlantOverrides(); }
+      // Re-flow the plan around the moved plant: pin every placed tree/large-shrub at its current spot
+      // (incl. this one at its new position) and let the understory re-place around them.
+      const fixed: Record<string, { x: number; y: number }> = {};
+      for (const s of plantSlotsRef.current) {
+        if (s.layer === 'tree' || s.layer === 'large_shrub') { const p = plantPositionsRef.current[s.id]; if (p) fixed[s.id] = p; }
+      }
+      runPlacementRef.current(fixed);
+      return;
+    }
     if (featDragRef.current) {
       const fd = featDragRef.current;
       featDragRef.current = null;
@@ -2622,6 +2814,15 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   const [openStep,  setOpenStep]  = useState<StepId | null>(initialStep);
   const [doneSteps, setDoneSteps] = useState<Set<StepId>>(new Set());
 
+  // Tour context: reveal the sun layer on the sun step, and open the sidebar section each step
+  // describes so the controls it talks about are visible beside the card.
+  useEffect(() => {
+    if (onboardIdx < 0) return;
+    const step = ONBOARD_STEPS[onboardIdx];
+    setShowSun(step.key === 'sun');
+    if (step.sidebarStep) setOpenStep(step.sidebarStep);
+  }, [onboardIdx]);
+
   // Changing steps (incl. clicking Done) deactivates everything, so no leftover
   // shape/size toolbar or handles linger on a later step.
   const openStepRef = useRef<StepId | null>(initialStep);
@@ -2654,7 +2855,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   const visibleSteps = useMemo<StepId[]>(() => [
     'features',
     ...(illustrative ? [] : ['walkways' as StepId, 'materials' as StepId]),
-    ...(illustrative ? ['details' as StepId, 'groundcover' as StepId, 'plants' as StepId] : []),
+    ...(illustrative ? ['details' as StepId, 'plants' as StepId] : []),
     ...(wantsPrivacy ? ['privacy' as StepId] : []),
   ], [wantsPrivacy, illustrative]);
 
@@ -2662,10 +2863,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   // Defaulted by style + yard side at preferences; adjustable here. Changing it re-derives ONLY the
   // lawn zone from the rule engine — the user's feature edits stay put (the fresh lawn is sited
   // against the default layout, so small overlaps are possible and remain editable).
-  const [lawnPick, setLawnPick] = useState<number>(() => (typeof prefs.lawnTarget === 'number' ? prefs.lawnTarget : 0.33));
-  const lawnCommitRef = useRef<number | null>(null); // debounce timer for the lawn slider
-  const applyLawnTarget = useCallback((v: number) => {
-    setLawnPick(v);
+  const applyLawnTarget = useCallback((v: number, shape?: ZoneShape) => {
     try {
       const p = JSON.parse(localStorage.getItem('userPreferences') || '{}');
       p.lawnTarget = v;
@@ -2678,7 +2876,8 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
       const door2 = (() => { try { return JSON.parse(localStorage.getItem('diyDoorPoint') || 'null') || undefined; } catch { return undefined; } })();
       const yard2 = (() => { try { return JSON.parse(localStorage.getItem('siteContext') || '{}').yard_type || undefined; } catch { return undefined; } })();
       const fresh = generateLayout({ boundary: saved2.boundary || [], existing: saved2.confirmedFeatures || [], prefs: prefs2, seed: 1, door: door2, sun: sunMap, yardType: yard2 });
-      const lawn = fresh?.zones.find(z => z.key === 'lawn');
+      const lawn0 = fresh?.zones.find(z => z.key === 'lawn');
+      const lawn = lawn0 && shape ? { ...lawn0, shape } : lawn0;
       setPlacedZones(prev => {
         const rest = prev.filter(z => z.key !== 'lawn');
         return lawn ? [lawn as any, ...rest] : rest;
@@ -2729,6 +2928,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   const [plantsLoaded, setPlantsLoaded] = useState(false);
   const [plantsErr, setPlantsErr] = useState(false);
   const [plantGroupOpen, setPlantGroupOpen] = useState(0); // which plant-type group is expanded
+  const [groundOpen, setGroundOpen] = useState(false);     // Primary-groundcover card collapsed by default (like features)
   const [swapTarget, setSwapTarget] = useState<{ layer: Layer; idx: number } | null>(null); // open swap popup
   const [swapPage, setSwapPage] = useState(0); // paged 8-at-a-time in the swap grid
   useEffect(() => { setSwapPage(0); }, [swapTarget]); // reset paging each time the popup opens
@@ -2748,25 +2948,17 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
 
   // Fraction of the open planting ground in each sun category (grid-sampled inside the boundary,
   // excluding features / structures / beds). Drives species variety + how many go in each region.
-  const sunAreaPct = useMemo<Record<SunCat, number> | null>(() => {
-    if (!sunMap || boundaryFt.length < 3) return null;
-    const featRings: [number, number][][] = [];
-    for (const z of placedZones) if (z.verts || (z.wFt > 0 && z.hFt > 0)) { try { featRings.push(shapeRingFt(z.shape, z.xFt, z.yFt, z.wFt, z.hFt, z.id, z.verts, z.rot)); } catch { /* skip */ } }
-    for (const b of placedBeds) { try { featRings.push(shapeRingFt(b.shape, b.xFt, b.yFt, b.wFt, b.hFt, b.id, b.verts)); } catch { /* skip */ } }
-    for (const v of obstacleFt) featRings.push(v);
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const [x, y] of boundaryFt) { if (x < minX) minX = x; if (y < minY) minY = y; if (x > maxX) maxX = x; if (y > maxY) maxY = y; }
-    const step = Math.max(2, Math.max(maxX - minX, maxY - minY) / 60);
-    const cnt: Record<SunCat, number> = { full: 0, part: 0, shade: 0 };
-    let tot = 0;
-    for (let x = minX; x <= maxX; x += step) for (let y = minY; y <= maxY; y += step) {
-      if (!ptInPoly(x, y, boundaryFt)) continue;
-      if (featRings.some(r => ptInPoly(x, y, r))) continue;
-      cnt[sunCatAt(x, y)]++; tot++;
-    }
-    if (!tot) return null;
-    return { full: cnt.full / tot, part: cnt.part / tot, shade: cnt.shade / tot };
-  }, [sunMap, boundaryFt, obstacleFt, placedZones, placedBeds, sunCatAt]);
+  // Plantable ground AREA + sun-region SHARES, from the ONE shared rule placePlan uses (plantableStats,
+  // over the same shapeRingFt-baked features the plan persists). The "plan is ready" preview measures the
+  // yard the identical way off the same persisted plan — so the editor can reproduce the stored plan
+  // exactly instead of generating a different one. Feeds the plant budgets (plantable) + sun distribution.
+  const plantStats = useMemo(() => {
+    const bake = (s: any): [number, number][] | null => { try { return shapeRingFt(s.shape, s.xFt, s.yFt, s.wFt, s.hFt, s.id, s.verts, s.rot); } catch { return null; } };
+    const zones = placedZones.filter(z => z.verts || (z.wFt > 0 && z.hFt > 0)).map(z => ({ ring: bake(z) })).filter(z => z.ring);
+    const beds = placedBeds.map(b => ({ ring: bake(b), material: b.material, type: b.type })).filter(b => b.ring);
+    return plantableStats({ boundary, existing, plan: { zones, beds, paths }, sunAt: sunMap ? sunCatAt : undefined });
+  }, [boundary, existing, placedZones, placedBeds, paths, sunMap, sunCatAt]);
+  const sunAreaPct = plantStats.sunShares;
   const sunAreaPctRef = useRef(sunAreaPct);
   useEffect(() => { sunAreaPctRef.current = sunAreaPct; }, [sunAreaPct]);
 
@@ -2799,7 +2991,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
         const ps = prefs.style || '';
         const pockets = plantPocketsRef.current;
         const [ts, ls, ms, gc] = await Promise.all([
-          selectTrees({ prefsStyle: ps, boundary, existing, projectAreaFt: plan.projectAreaFt, zone, coverageGoal: shade ? SHADE_CANOPY_COVERAGE_GOAL : TREE_CANOPY_COVERAGE_GOAL, capacity: pockets ?? undefined }),
+          selectTrees({ prefsStyle: ps, boundary, existing, projectAreaFt: plan.projectAreaFt, zone, coverageGoal: shade ? SHADE_CANOPY_COVERAGE_GOAL : TREE_CANOPY_COVERAGE_GOAL, capacity: pockets ?? undefined, yardType }),
           selectLayer('large_shrub', { prefsStyle: ps, zone }),
           selectLayer('shrub', { prefsStyle: ps, zone }),
           selectLayer('groundcover', { prefsStyle: ps, zone }),
@@ -2870,14 +3062,34 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
           topUp(false);  // …but fill the budget with grasses rather than leave the layer short
           return chosen;
         };
-        // Arm the structural self-correction loop for this fresh (auto) generation.
-        autoSubstRef.current = true; substIterRef.current = 0; substTriedRef.current = new Set();
-        setPicks({
-          tree: ts.candidates.slice(0, Math.min(ts.candidates.length, ts.targetToPlant === 0 ? 0 : Math.max(1, Math.min(speciesShares[0], ts.targetToPlant)))),
-          large_shrub: seed(ls.candidates, Math.min(ls.candidates.length, speciesShares[1]), true),
-          shrub: seed(ms.candidates, Math.min(ms.candidates.length, speciesShares[2]), false, Math.ceil(Math.min(ms.candidates.length, speciesShares[2]) / 2)),
-          groundcover: seed(gc.candidates, Math.min(gc.candidates.length, speciesShares[3]), false),
-        });
+        // HYDRATE vs GENERATE. If the "plan is ready" step already picked species for THIS plan (its
+        // signature matches the current plan), surface those exact picks instead of re-selecting — so the
+        // preview and the editor show the same plan. The selection above still ran (its candidate pools
+        // feed the swap menus). Only when there's no matching stored plan do we generate fresh.
+        const storedPicks = (() => {
+          try {
+            const sig = localStorage.getItem('diyPlantPicksSig') || '';
+            if (!sig || sig !== (localStorage.getItem('diyPlacementPlanSig') || '')) return null;
+            const p = JSON.parse(localStorage.getItem('diyPlantPicks') || 'null');
+            if (p && ['tree', 'large_shrub', 'shrub', 'groundcover'].every(k => Array.isArray(p[k]))) return p as Record<Layer, SpeciesCandidate[]>;
+          } catch { /* fall through to generate */ }
+          return null;
+        })();
+        if (storedPicks) {
+          autoSubstRef.current = false; // stored picks are already final (substitution ran when generated)
+          setPicks(storedPicks);
+        } else {
+          // Arm the structural self-correction loop for this fresh (auto) generation.
+          autoSubstRef.current = true; substIterRef.current = 0; substTriedRef.current = new Set();
+          setPicks({
+            tree: ts.candidates.slice(0, Math.min(ts.candidates.length, ts.targetToPlant === 0 ? 0 : Math.max(1, Math.min(speciesShares[0], ts.targetToPlant)))),
+            // No grass cap here: narrow upright grasses now read as focals via clumping (see plantSlots),
+            // so capping them would fight that. The width-sort in selectLayer still leads with broad species.
+            large_shrub: seed(ls.candidates, Math.min(ls.candidates.length, speciesShares[1]), true),
+            shrub: seed(ms.candidates, Math.min(ms.candidates.length, speciesShares[2]), false, Math.ceil(Math.min(ms.candidates.length, speciesShares[2]) / 2)),
+            groundcover: seed(gc.candidates, Math.min(gc.candidates.length, speciesShares[3]), false),
+          });
+        }
         setPlantsLoaded(true);
       } catch { if (live) setPlantsErr(true); }
     })();
@@ -2889,17 +3101,9 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   const plantTotalSpecies = LAYER_ORDER.reduce((s, l) => s + picks[l].length, 0);
   const plantsAtMax = plantTotalSpecies >= speciesBudget.max;
 
-  // Structural space budget — trees + large shrubs compete for open planting ground.
-  // Computed from live state (NOT the persisted plan, which lags a render behind and is missing
-  // primaryGroundAreaFt entirely on a freshly generated plan).
-  const plantable = useMemo(() => {
-    let beds = 0;
-    for (const b of placedBeds) {
-      if (b.material === 'lawn' || b.type !== 'planted') continue;
-      try { beds += ringAreaAbs(shapeRingFt(b.shape, b.xFt, b.yFt, b.wFt, b.hFt, b.id, b.verts)); } catch { /* skip */ }
-    }
-    return Math.max(0, primaryGroundAreaFt + beds);
-  }, [placedBeds, primaryGroundAreaFt]);
+  // Structural space budget — trees + large shrubs compete for open planting ground. Uses the shared
+  // plantableStats measure (above) so the editor and the "plan is ready" preview agree on the yard's size.
+  const plantable = plantStats.plantableFt;
   const usableGround = plantable * PLANT_PACKING_EFFICIENCY;
   const hasPlantSpace = plantable > 0;
   const treeAvgFoot = picks.tree.length ? picks.tree.reduce((s, t) => s + canopyFootprintFt(t.matureWidthFt), 0) / picks.tree.length : 0;
@@ -2943,7 +3147,8 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
     setPicks(prev => { const copy = [...prev[l]]; copy[idx] = next; return { ...prev, [l]: copy }; });
     setSwapTarget(null);
   };
-  const removePick = (l: Layer, idx: number) => setPicks(prev => prev[l].length <= 1 ? prev : { ...prev, [l]: prev[l].filter((_, i) => i !== idx) });
+  // Trees are optional, so their X may remove the last one (→ zero trees); other layers keep ≥1.
+  const removePick = (l: Layer, idx: number) => setPicks(prev => (prev[l].length <= 1 && l !== 'tree') ? prev : { ...prev, [l]: prev[l].filter((_, i) => i !== idx) });
   const addPick = (l: Layer) => setPicks(prev => {
     const pool = poolFor(l), shown = new Set(prev[l].map(c => c.id));
     const cap = structuralLayer(l) ? remainingCapacity() : null;
@@ -2969,96 +3174,38 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   };
 
   // Plant instances (trees as individuals; shrubs/groundcover as drifts filling a share of the ground).
-  const canopyR = (c: SpeciesCandidate) => Math.max(0.4, c.matureWidthFt / 2);
-  const DRIFT: Record<string, number> = { large_shrub: 1, shrub: 5, groundcover: 10 };
-  const GROUND_SHARE: Record<string, number> = { large_shrub: 0.10, shrub: 0.40, groundcover: 0.50 };
-  const FRONT_TALL_HEIGHT_FT = 4;
-  type PlantSlot = { id: string; layer: Layer; r: number; name: string; under: boolean; drift: string; tall: boolean; sun?: SunCat[] };
-  // Visual-interest plants (trees + large shrubs) are capped at 1 per 500 sf of planting ground,
-  // rounded down — split across the yard's sun regions and cycling species for variety.
-  const VISUAL_SF_PER_PLANT = 500;
-  const plantSlots = useMemo<PlantSlot[]>(() => {
-    const s: PlantSlot[] = [];
-    const catAreaPct = sunAreaPct; // null → treat the whole yard as one region (unconstrained)
-    const cats: (SunCat | null)[] = catAreaPct ? SUN_CATS.filter(c => catAreaPct[c] > 0.01) : [null];
-    const visualCap = Math.max(0, Math.floor(plantable / VISUAL_SF_PER_PLANT));
-
-    // Trees first (overstory, not sun-constrained), capped by the visual-interest budget.
-    const treeWant = Math.max(treeSel?.targetToPlant ?? 0, picks.tree.length);
-    const treeN = Math.min(treeWant, visualCap);
-    for (let i = 0; i < treeN && picks.tree.length; i++) {
-      const sp = picks.tree[i % picks.tree.length], name = sp.common_name || sp.botanical_name;
-      s.push({ id: `tree-${i}`, layer: 'tree', r: canopyR(sp), name, under: isUnderPlanting(sp), drift: `tree-${i}`, tall: false });
-    }
-
-    // Large shrubs fill the remaining visual-interest budget, distributed across sun regions by area
-    // and cycling through the picked species so it's not all one plant.
-    const largeN = Math.max(0, visualCap - treeN);
-    if (picks.large_shrub.length && largeN > 0) {
-      const catList: (SunCat | null)[] = [];
-      if (catAreaPct) {
-        // FIX 1: split the large-shrub budget across present sun regions with a largest-remainder
-        // allocation (never Math.round-to-zero) so every present category keeps ≥1 slot when largeN
-        // allows. Previously a minority region could round to 0, so a species whose ONLY compatible
-        // region rounded away got zero placement attempts (never even reached fits()).
-        const presentSun = cats as SunCat[];
-        const quota = allocateProportional(largeN, presentSun.map(c => Math.max(0, catAreaPct[c])));
-        presentSun.forEach((c, i) => { for (let k = 0; k < quota[i]; k++) catList.push(c); });
-      }
-      while (catList.length < largeN) catList.push((cats[catList.length % cats.length]) ?? null);
-      catList.length = largeN;
-      const speciesIdx: Record<string, number> = {};
-      catList.forEach((cat, li) => {
-        const pool = cat ? picks.large_shrub.filter(sp => plantSunCats(sp.sun_requirement).includes(cat)) : picks.large_shrub;
-        if (!pool.length) return;
-        const key = cat ?? 'x'; const idx = speciesIdx[key] ?? 0; speciesIdx[key] = idx + 1;
-        const sp = pool[idx % pool.length], drift = `large-${key}-${li}`;
-        s.push({ id: `${drift}-0`, layer: 'large_shrub', r: canopyR(sp), name: sp.common_name || sp.botanical_name, under: isUnderPlanting(sp), drift, tall: sp.matureHeightFt >= FRONT_TALL_HEIGHT_FT, sun: cat ? [cat] : undefined });
-      });
-    }
-
-    // Understory (shrubs + groundcover): fill a share of the ground, split by sun region.
-    const groundLayers = (['shrub', 'groundcover'] as Layer[]).filter(l => picks[l].length);
-    const shareSum = groundLayers.reduce((sum, l) => sum + GROUND_SHARE[l], 0) || 1;
-    let d = 0;
-    // Density as a PER-SPECIES count scale: each sun-bucket's full-density drift budget is split
-    // equally among its species (equal split IS the anti-monoculture rule), then each species'
-    // share scales by densityFrac flooring at 1 — so EVERY selected species appears at EVERY
-    // density. Clump SIZE also thins (drift members scale ~0.45→1.0): sparse = smaller clumps of
-    // everything, not "groundcover blankets stay while shrub species vanish".
-    const densityFrac = densityParams(plantDensity).coverage; // 0.30 (sparse) … 1.0 (lush)
-    const memberCount = (driftN: number) => Math.max(2, Math.round(driftN * (0.45 + 0.55 * densityFrac)));
-    for (const layer of groundLayers) {
-      if (plantable <= 0) break;
-      const driftN = DRIFT[layer] || 3;
-      for (const cat of cats) {
-        const catSpecies = cat ? picks[layer].filter(sp => plantSunCats(sp.sun_requirement).includes(cat)) : picks[layer];
-        if (!catSpecies.length) continue;
-        const catShare = cat && catAreaPct ? catAreaPct[cat] : 1;
-        const bucketAreaFull = plantable * (GROUND_SHARE[layer] / shareSum) * catShare; // at full density
-        if (bucketAreaFull <= 0) continue;
-        const avgR = catSpecies.reduce((sum, sp) => sum + canopyR(sp), 0) / catSpecies.length;
-        const fullDrifts = Math.max(catSpecies.length, Math.round(bucketAreaFull / (driftN * Math.PI * avgR * avgR)));
-        const baseN = Math.floor(fullDrifts / catSpecies.length), extraN = fullDrifts % catSpecies.length;
-        const mN = memberCount(driftN);
-        catSpecies.forEach((sp, i) => {
-          const speciesDrifts = Math.max(1, Math.round((baseN + (i < extraN ? 1 : 0)) * densityFrac));
-          const r = canopyR(sp), name = sp.common_name || sp.botanical_name;
-          const under = isUnderPlanting(sp), tall = sp.matureHeightFt >= FRONT_TALL_HEIGHT_FT;
-          for (let n = 0; n < speciesDrifts && s.length < 360; n++) {
-            const key = `${layer}-${cat ?? 'x'}-${d}`;
-            for (let k = 0; k < mN; k++) s.push({ id: `${key}-${k}`, layer, r, name, under, drift: key, tall, sun: cat ? [cat] : undefined });
-            d++;
-          }
-        });
-      }
-    }
-    return s;
-  }, [picks.tree, picks.large_shrub, picks.shrub, picks.groundcover, treeSel, plantable, sunAreaPct, plantDensity]);
+  // The instance-building rules live in the SHARED buildPlantSlots so the "plan is ready" preview
+  // (draftPlants) and this editor produce the identical plan — see services/plantSlots.ts.
+  const plantSlots = useMemo<PlantSlot[]>(() => buildPlantSlots({
+    picks,
+    treeTargetToPlant: treeSel?.targetToPlant ?? 0,
+    plantableFt: plantable,
+    catAreaPct: sunAreaPct,
+    densityCoverage: densityParams(plantDensity).coverage,
+  }), [picks.tree, picks.large_shrub, picks.shrub, picks.groundcover, treeSel, plantable, sunAreaPct, plantDensity]);
 
   const [plantPositions, setPlantPositions] = useState<Record<string, { x: number; y: number }>>({});
   const plantPositionsRef = useRef(plantPositions);
   useEffect(() => { plantPositionsRef.current = plantPositions; }, [plantPositions]);
+  // Manual plant-move overrides (slot id → position), so a dragged visual-interest plant STAYS where the
+  // user put it across re-entry. Seeded from localStorage only when its signature matches the current
+  // plan (a regenerate invalidates them). Merged into `fixed` at placement so the placer honours them.
+  const plantOverridesRef = useRef<Record<string, { x: number; y: number }>>((() => {
+    try {
+      const sig = localStorage.getItem('diyPlantOverridesSig') || '';
+      if (sig && sig === (localStorage.getItem('diyPlacementPlanSig') || '')) {
+        const o = JSON.parse(localStorage.getItem('diyPlantOverrides') || '{}');
+        if (o && typeof o === 'object') return o as Record<string, { x: number; y: number }>;
+      }
+    } catch { /* ignore */ }
+    return {};
+  })());
+  const persistPlantOverrides = useCallback(() => {
+    try {
+      localStorage.setItem('diyPlantOverrides', JSON.stringify(plantOverridesRef.current));
+      localStorage.setItem('diyPlantOverridesSig', localStorage.getItem('diyPlacementPlanSig') || '');
+    } catch { /* quota */ }
+  }, []);
   useEffect(() => { plantSlotsRef.current = plantSlots; }, [plantSlots]); // keep the click hit-test slots fresh
   // The plantSlots reference the CURRENT plantPositions were computed for. Placement runs in the
   // effect below (after render), so between a slot-set change and that effect this ref still points
@@ -3077,14 +3224,13 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   const autoSubstRef = useRef(false);          // is an auto self-correction pass allowed right now?
   const substIterRef = useRef(0);              // passes spent this generation
   const substTriedRef = useRef<Set<number>>(new Set()); // candidate ids already tried & failed this generation
-  // Auto-place whenever the slot set changes (preserving any positions already computed).
-  useEffect(() => {
-    if (!plantsLoaded) return;
+  // Run placement with a GIVEN set of fixed positions, then commit. Shared by the slot-change effect
+  // (pins every already-placed instance so edits don't re-shuffle the plan) and the plant-move handler
+  // (pins only the structural plants, so the understory re-flows around a dragged tree/large shrub).
+  const runPlacement = useCallback((fixed: Record<string, { x: number; y: number }>) => {
     if (!plantSlots.length) { placedSlotsRef.current = plantSlots; setPlantPositions({}); return; }
     const plan = (() => { try { return JSON.parse(localStorage.getItem('diyPlacementPlan') || '{}'); } catch { return {}; } })();
-    const fixed: Record<string, { x: number; y: number }> = {};
-    for (const s of plantSlots) if (plantPositionsRef.current[s.id]) fixed[s.id] = plantPositionsRef.current[s.id];
-    const raw = placePlan({ boundary, existing, plan: { zones: plan.zones || [], beds: plan.beds || [], paths: plan.paths || [] }, instances: plantSlots.map(s => ({ id: s.id, layer: s.layer, r: s.r, under: s.under, drift: s.drift, tall: s.tall, sun: s.sun })), fixed, sunAt: sunMap ? sunCatAt : undefined, focalSlots: focalSlotsRef.current.length ? focalSlotsRef.current : undefined, packing: densityParams(plantDensity).packing, massing: dbStyle === 'modern' ? 'row' : undefined });
+    const raw = placePlan({ boundary, existing, plan: { zones: plan.zones || [], beds: plan.beds || [], paths: plan.paths || [] }, instances: plantSlots.map(s => ({ id: s.id, layer: s.layer, r: s.r, under: s.under, drift: s.drift, tall: s.tall, sun: s.sun, name: s.name, type: s.type })), fixed, sunAt: sunMap ? sunCatAt : undefined, focalSlots: focalSlotsRef.current.length ? focalSlotsRef.current : undefined, packing: densityParams(plantDensity).packing, massing: dbStyle === 'modern' ? 'row' : undefined });
     // HARD RULE: reject any placed plant whose full mature footprint overlaps a feature (zone pad,
     // path corridor, or house/structure/hardscape). placePlan already avoids these, but this is the
     // authoritative guard — it also catches zones that reached the engine without a baked ring.
@@ -3096,8 +3242,36 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
     const rById = new Map(plantSlots.map(s => [s.id, s.r]));
     const clean: Record<string, { x: number; y: number }> = {};
     for (const id in raw) { const p = raw[id]; if (clearOf(p.x, p.y, rById.get(id) ?? 0)) clean[id] = p; }
+    // Understory must not hide UNDER a large shrub (they share the ground plane). Drop any understory
+    // instance whose centre falls inside a placed non-underplanting large-shrub canopy.
+    const bigShrubs = plantSlots
+      .filter(s => s.layer === 'large_shrub' && !s.under && clean[s.id])
+      .map(s => ({ x: clean[s.id].x, y: clean[s.id].y, r: s.r }));
+    if (bigShrubs.length) {
+      for (const s of plantSlots) {
+        if (s.layer !== 'shrub' && s.layer !== 'groundcover') continue;
+        const p = clean[s.id]; if (!p) continue;
+        if (bigShrubs.some(b => Math.hypot(p.x - b.x, p.y - b.y) < b.r)) delete clean[s.id];
+      }
+    }
     placedSlotsRef.current = plantSlots; // these positions correspond to THIS slot set
     setPlantPositions(clean);
+  }, [plantSlots, boundary, existing, cs, sunMap, sunCatAt, plantDensity, dbStyle]);
+  const runPlacementRef = useRef(runPlacement);
+  useEffect(() => { runPlacementRef.current = runPlacement; }, [runPlacement]);
+
+  // Auto-place whenever the slot set changes, pinning every already-placed instance so edits (swap/add/
+  // density) don't re-shuffle the whole plan.
+  useEffect(() => {
+    if (!plantsLoaded) return;
+    const fixed: Record<string, { x: number; y: number }> = {};
+    for (const s of plantSlots) {
+      // Prefer a live position; else a persisted manual override (so a re-entry restores dragged plants).
+      if (plantPositionsRef.current[s.id]) fixed[s.id] = plantPositionsRef.current[s.id];
+      else if (plantOverridesRef.current[s.id]) fixed[s.id] = plantOverridesRef.current[s.id];
+    }
+    runPlacement(fixed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plantSlots, plantsLoaded, boundary, existing, wantsPrivacy, sunMap, sunCatAt]);
 
   // Structural self-correction pass — see autoSubstRef above. Runs ONLY after placement has settled
@@ -3185,6 +3359,18 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   const placedPicksReady = placementSettled || LAYER_ORDER.some(l => placedPicks[l].length > 0);
   const placedTotalSpecies = LAYER_ORDER.reduce((s, l) => s + placedPicks[l].length, 0);
 
+  // When a plan click spotlighted a species (pendingPlantScrollRef), scroll its card into view once
+  // the Plants step is open and the cards have rendered. Retries across renders until the card mounts.
+  useEffect(() => {
+    const name = pendingPlantScrollRef.current;
+    if (!name || openStep !== 'plants') return;
+    const el = plantCardRefs.current[name];
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      pendingPlantScrollRef.current = null;
+    }
+  }, [selSpecies, openStep, plantGroupOpen, plantsLoaded, placedPicksReady, placedPicks]);
+
   // Feed the drawn markers to the canvas (feet coords — same CS as the placement page).
   useEffect(() => {
     const out: PlantMarker[] = [];
@@ -3209,6 +3395,16 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
     });
     try { localStorage.setItem('diyPlantInstances', JSON.stringify(instances)); } catch { /* ignore */ }
   }, [plantPositions, plantSlots, plantSpeciesColor, plantsLoaded, picks]);
+
+  // Keep the persisted picks in sync with the current selection, tagged with the plan signature — so a
+  // later re-entry (or the review/3D views) hydrates the SAME plan, and edits here are what gets surfaced.
+  useEffect(() => {
+    if (!plantsLoaded) return;
+    try {
+      localStorage.setItem('diyPlantPicks', JSON.stringify(picks));
+      localStorage.setItem('diyPlantPicksSig', localStorage.getItem('diyPlacementPlanSig') || '');
+    } catch { /* quota */ }
+  }, [picks, plantsLoaded]);
 
 
   // ── Stats
@@ -3365,16 +3561,28 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   }, [guideZones, illustrative]);
   const guideZone = guideZones[guideIdx] ?? null;
   const guideHint = guideZone ? (guideZone.key === 'water' ? waterHint : (FEAT_HINTS[guideZone.key] ?? '')) : '';
-  // Pristine as-generated zones (by id) so a feature can be reset to its original shape/material/placement.
-  const originalZones = useMemo<Record<string, PlacedZone>>(() => {
-    try { const p = JSON.parse(localStorage.getItem('diyPlacementPlanOriginal') || '{}'); const m: Record<string, PlacedZone> = {}; for (const z of (p.zones ?? [])) m[z.id] = z; return m; } catch { return {}; }
-  }, []);
-  const resetGuideZone = useCallback(() => {
-    if (!guideZone) return;
-    const o = originalZones[guideZone.id];
-    if (!o) return;
-    updateZone(guideZone.id, { shape: o.shape, material: o.material, xFt: o.xFt, yFt: o.yFt, wFt: o.wFt, hFt: o.hFt, rot: o.rot ?? 0, verts: o.verts });
-  }, [guideZone, originalZones, updateZone]);
+  // Global "reset to generated plan": revert ALL plan geometry (zones incl. lawn, beds, walkways/creeks,
+  // primary groundcover) to the as-generated snapshot (diyPlacementPlanOriginal). Plant choices are a
+  // separate step and are left untouched. Refs sync from state via effects, which also trigger a redraw.
+  const resetToGenerated = useCallback(() => {
+    try {
+      const orig = JSON.parse(localStorage.getItem('diyPlacementPlanOriginal') || 'null');
+      if (!orig || !Array.isArray(orig.zones)) return;
+      // Same lawn-dedup guard as the initial load.
+      const lawns = orig.zones.filter((z: any) => z.key === 'lawn');
+      const zones = lawns.length <= 1 ? orig.zones
+        : orig.zones.filter((z: any) => z.key !== 'lawn' || z === lawns.reduce((a: any, b: any) => (a.wFt * a.hFt >= b.wFt * b.hFt ? a : b)));
+      setPlacedZones(zones);
+      setPlacedBeds(Array.isArray(orig.beds) ? orig.beds : []);
+      setPaths(Array.isArray(orig.paths) ? orig.paths : []);
+      setDefaultMaterial(orig.primary?.material ?? null);
+      setDefaultVariant(orig.primary?.variant ?? null);
+      focalSlotsRef.current = Array.isArray(orig.focalSlots) ? orig.focalSlots : [];
+      clearAllSelections();
+      setGuideIdx(-1);
+      localStorage.setItem('diyPlacementPlan', JSON.stringify(orig)); // persist the reverted plan
+    } catch { /* ignore */ }
+  }, [clearAllSelections]);
   // Explain why this feature landed where it did (near the house vs. out in the yard) + the alternative.
   const guideReason = (() => {
     if (!guideZone) return '';
@@ -3429,32 +3637,32 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
           : z.shape === 'circle' && w === h ? `${SHAPE_LABEL.circle} · ${w} ft`
           : `${SHAPE_LABEL[z.shape] ?? z.shape} · ${w} × ${h} ft`;
         const reason = (() => {
-          if (!z) return "Your style leans away from a lawn, so we didn't add one — pick an amount below to add it to the plan.";
-          if (isLawn) return 'An open stretch of grass, sized from your lawn preference. Drag or resize it on the plan.';
+          if (!z) return "Your style leans away from a lawn, so we didn't add one. Pick a shape below to override.";
+          if (isLawn) return "Placed in an open, uninterrupted section of the yard so it's easier to use and maintain.";
           const fx = z.xFt + z.wFt / 2, fy = z.yFt + z.hFt / 2;
           let near = true;
           const ref = houseGeomFt?.centroid;
           if (ref && cs) near = Math.hypot(fx - ref[0], fy - ref[1]) < Math.hypot(cs.widthFt, cs.heightFt) * 0.33;
-          const base = placementReason(z.key, (z.label || '').toLowerCase(), near) || (z.key === 'water' ? waterHint : (FEAT_HINTS[z.key] ?? ''));
-          return `${base ? base + ' ' : ''}Drag it on the plan to move it.`;
+          return placementReason(z.key, (z.label || '').toLowerCase(), near) || (z.key === 'water' ? waterHint : (FEAT_HINTS[z.key] ?? ''));
         })();
         return (
-          <div key={z ? z.id : '__lawn_placeholder'} style={{ border: `1.5px solid ${open ? 'rgba(42,42,38,0.35)' : 'rgba(42,42,38,0.12)'}`, borderRadius: 12, background: 'white', overflow: 'hidden' }}>
+          <div key={z ? z.id : '__lawn_placeholder'} style={cardShell(open)}>
             {/* Card header */}
             <button onClick={() => setGuideIdx(open ? -1 : i)}
               className="w-full flex items-center gap-2.5 transition-all hover:opacity-85"
               style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '11px 13px', textAlign: 'left' }}>
-              <span style={{ fontFamily: IT, fontSize: '0.9rem', fontWeight: 600, color: '#2A2A26' }}>{label}</span>
-              <span className="ml-auto" style={{ fontFamily: IT, fontSize: '0.72rem', color: '#9A9A92', flexShrink: 0 }}>
-                {open ? (z ? `${w} × ${h} ft · ${area.toLocaleString()} sq ft` : 'None') : summary} {open ? '' : '›'}
+              <span style={CARD_TITLE}>{label}</span>
+              <span className="ml-auto" style={CARD_SUMMARY}>
+                {open ? (z ? `${w} × ${h} ft · ${area.toLocaleString()} sq ft` : 'None') : summary}
               </span>
+              <Chevron open={open} />
             </button>
 
             {open && (
               <div className="px-3.5 pb-3.5 flex flex-col gap-3">
                 <p style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', margin: 0, lineHeight: 1.5 }}>{reason}</p>
 
-                {z && (
+                {z && !isLawn && (
                 <div className="flex flex-col gap-1.5">
                   <span style={stepLabelStyle}>Shape</span>
                   <div className="flex gap-1.5">
@@ -3497,36 +3705,29 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
                 )}
 
                 {isLawn && (
-                  <div className="flex flex-col gap-1">
-                    <div className="flex items-baseline justify-between">
-                      <span style={stepLabelStyle}>Lawn amount</span>
-                      <span style={{ fontFamily: IT, fontSize: '0.72rem', color: '#6A6A60' }}>
-                        {lawnPick <= 0 ? 'None' : `~${Math.round(lawnPick * Math.max(0, boundaryAreaFt - existingNonTreeAreaFt)).toLocaleString()} sq ft`}
-                      </span>
-                    </div>
-                    <input type="range" min={0} max={0.7} step={0.01} value={lawnPick}
-                      onChange={e => {
-                        const v = Number(e.target.value);
-                        setLawnPick(v);
-                        // Re-deriving the lawn zone runs the layout engine — debounce to slider release.
-                        if (lawnCommitRef.current) window.clearTimeout(lawnCommitRef.current);
-                        lawnCommitRef.current = window.setTimeout(() => applyLawnTarget(v), 300);
-                      }}
-                      style={{ width: '100%', accentColor: '#2F6B4F', cursor: 'pointer' }} />
-                    <div className="flex justify-between" style={{ fontFamily: IT, fontSize: '0.68rem', color: '#9A9A92' }}>
-                      <span>None</span><span>A lot</span>
+                  <div className="flex flex-col gap-1.5">
+                    <span style={stepLabelStyle}>Shape</span>
+                    <div className="flex gap-1.5">
+                      {([{ id: 'rect', label: 'Square' }, { id: 'circle', label: 'Round' }, { id: 'organic', label: 'Organic' }, { id: 'none', label: 'None' }] as { id: ZoneShape | 'none'; label: string }[]).map(s => {
+                        const on = s.id === 'none' ? !z : (!!z && z.shape === s.id);
+                        return (
+                          <button key={s.id} onClick={() => {
+                            if (s.id === 'none') { applyLawnTarget(0); }
+                            else if (z) { updateZone(z.id, { shape: s.id }); }
+                            else { applyLawnTarget(typeof prefs.lawnTarget === 'number' && prefs.lawnTarget > 0 ? prefs.lawnTarget : 0.33, s.id); }
+                          }}
+                            className="flex-1 py-2 rounded-full transition-all hover:opacity-90"
+                            style={{ fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer',
+                              background: on ? '#2A2A26' : 'white', color: on ? '#efe9db' : '#2A2A26',
+                              border: on ? '1.5px solid #2A2A26' : '1.5px solid rgba(42,42,38,0.14)' }}>
+                            {s.label}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
 
-                {z && originalZones[z.id] && (
-                  <div style={{ marginTop: 2 }}>
-                    <button onClick={resetGuideZone}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: IT, fontSize: '0.76rem', fontWeight: 500, color: '#9A9A92', textDecoration: 'underline' }}>
-                      Reset
-                    </button>
-                  </div>
-                )}
               </div>
             )}
           </div>
@@ -3540,194 +3741,290 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
     ? CREEK_MATERIALS
     : PATH_MATERIALS.map(m => ({ id: m.id, label: m.label, color: m.color }));
   const selDetailPath = paths.find(p => p.id === selectedPathId) ?? null;
-  const detailsPanel = (
-    <div className="flex flex-col gap-4">
-      <p style={{ fontFamily: IT, fontSize: '0.9rem', color: '#6A6A60', margin: 0, lineHeight: 1.55 }}>
-        Add the finishing touches to your project layout.
-      </p>
+  const accentBeds = placedBeds.filter(b => b.id.startsWith('det_bed'));
+  const groundVariantLabel = defaultMaterial ? (variantsFor(defaultMaterial).find(v => v.id === defaultVariant)?.label ?? '') : '';
+  const groundSummary = defaultMaterial
+    ? `${defaultMaterial.charAt(0).toUpperCase()}${defaultMaterial.slice(1)}${groundVariantLabel ? ` · ${groundVariantLabel}` : ''}`
+    : 'Not set';
 
-      {detailKind ? (
-        <div className="flex flex-col gap-3 rounded-xl p-3.5" style={{ background: 'rgba(42,42,38,0.06)' }}>
-          <div className="flex items-center justify-between">
-            <span style={{ fontFamily: IT, fontSize: '0.9rem', color: '#2A2A26', fontWeight: 600 }}>{detailKind === 'creek' ? 'Dry creek bed' : 'Walkway'}</span>
-            <button onClick={cancelDetailDraw} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9A9A92', fontFamily: IT, fontSize: '0.78rem' }}>Done</button>
-          </div>
-          <p style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', margin: 0, lineHeight: 1.5 }}>
-            Click two points on the map to connect them{pathDrawMode === 'picking-end' ? ' — now click the end point.' : '.'}
-          </p>
-
-          <div className="flex flex-col gap-1.5">
-            <span style={stepLabelStyle}>Shape</span>
-            <div className="flex gap-1.5">
-              {(['straight', 'winding'] as PathStyle[]).map(s => (
-                <button key={s} onClick={() => setDetailStyleLive(s)}
-                  className="flex-1 rounded-full px-3 py-1.5 capitalize transition-all"
-                  style={{ background: detailStyle === s ? '#2A2A26' : 'white', color: detailStyle === s ? '#efe9db' : '#6A6A60', fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, border: `1.5px solid ${detailStyle === s ? '#2A2A26' : 'rgba(42,42,38,0.16)'}`, cursor: 'pointer' }}>
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {detailMaterialOptions.length > 1 && (
-          <div className="flex flex-col gap-1.5">
-            <span style={stepLabelStyle}>Material</span>
-            <div className="grid grid-cols-2 gap-1.5">
-              {detailMaterialOptions.map(m => (
-                <button key={m.id} onClick={() => setDetailMaterial(m.id)}
-                  className="flex items-center gap-2 rounded-lg px-2.5 py-2 transition-all"
-                  style={{ background: detailMaterial === m.id ? 'white' : 'transparent', border: `1.5px solid ${detailMaterial === m.id ? '#2A2A26' : 'rgba(42,42,38,0.14)'}`, cursor: 'pointer' }}>
-                  <span style={{ width: 14, height: 14, borderRadius: 4, background: m.color, flexShrink: 0, border: '1px solid rgba(0,0,0,0.1)' }} />
-                  <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26' }}>{m.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          )}
+  // Each detail type (walkways / dry creek beds / accent beds) is rendered like a plant layer: a
+  // labeled list of what's already built, then an "Add another" (or first-add) button below.
+  const walkwayPaths = paths.filter(p => (p.kind ?? 'walkway') !== 'creek');
+  const creekPaths   = paths.filter(p => (p.kind ?? 'walkway') === 'creek');
+  const detailHeader = (label: string, count: number) => (
+    <div className="flex items-baseline gap-2">
+      <span style={{ fontFamily: IT, fontSize: '0.8rem', fontWeight: 600, color: '#2A2A26' }}>{label}</span>
+      {count > 0 && <span style={{ fontFamily: IT, fontSize: '0.7rem', color: '#B0B0A6', marginLeft: 'auto' }}>{count}</span>}
+    </div>
+  );
+  const detailAddBtn = (label: string, onClick: () => void) => (
+    <button onClick={onClick} className="flex items-center gap-2 rounded-xl px-3 py-2 hover:opacity-80 transition-all" style={ADD_ROW}>
+      <span style={{ fontSize: '1.05rem', lineHeight: 1 }}>+</span> {label}
+    </button>
+  );
+  const pathRow = (p: PlacedPath) => (
+    <div onClick={() => { if (detailKind) cancelDetailDraw(); setSelectedPathId(selectedPathId === p.id ? null : p.id); }}
+      className="flex items-center gap-2 rounded-xl px-3 py-2 transition-all"
+      style={{ ...selShell(selectedPathId === p.id), cursor: 'pointer' }}>
+      <span style={{ width: 8, height: 8, borderRadius: 2, background: p.color ?? PATH_COLOR, flexShrink: 0 }} />
+      <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26', flex: 1 }}>{p.label}</span>
+      <button onClick={(e) => { e.stopPropagation(); setPaths(prev => prev.filter(x => x.id !== p.id)); if (selectedPathId === p.id) setSelectedPathId(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0 }}>✕</button>
+    </div>
+  );
+  const accentRow = (b: PlacedBed) => (
+    <div onClick={() => { const on = selectedBedId === b.id; setSelectedPathId(null); setSelectedBedId(on ? null : b.id); }}
+      className="flex items-center gap-2 rounded-xl px-3 py-2 transition-all"
+      style={{ ...selShell(selectedBedId === b.id), cursor: 'pointer' }}>
+      <span style={{ width: 8, height: 8, borderRadius: 2, background: b.variant ? VARIANT_COLOR[b.variant] : MATERIAL_COLOR[b.material], flexShrink: 0 }} />
+      <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26', flex: 1 }}>{b.label}</span>
+      <button onClick={(e) => { e.stopPropagation(); setPlacedBeds(prev => prev.filter(x => x.id !== b.id)); if (selectedBedId === b.id) setSelectedBedId(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0 }}>✕</button>
+    </div>
+  );
+  // Add an accent bed by choosing a shape: drop a default-sized bed of that shape at the yard's centre
+  // (staggered so repeats don't stack) and select it, so the user drags/resizes it like a feature.
+  const addAccentBed = (shape: ZoneShape) => {
+    let cx = 0, cy = 0;
+    if (boundaryFt.length) { for (const [x, y] of boundaryFt) { cx += x; cy += y; } cx /= boundaryFt.length; cy /= boundaryFt.length; }
+    const off = accentBeds.length * 3; // stagger so successive beds don't land exactly on top of each other
+    const w = 12, h = 10;
+    // Material: match existing accent beds if any; otherwise contrast the primary groundcover (rock beds
+    // on a mulch yard, or vice versa) so the first accent reads as an accent rather than blending in.
+    const prior = accentBeds[accentBeds.length - 1];
+    let material: GroundMaterial, variant: GroundVariant;
+    if (prior && (prior.material === 'mulch' || prior.material === 'rock')) {
+      material = prior.material; variant = prior.variant as GroundVariant;
+    } else {
+      const primary: GroundMaterial = defaultMaterial ?? 'mulch';
+      material = primary === 'mulch' ? 'rock' : 'mulch';
+      variant = GROUND_VARIANTS[material][0].id;
+    }
+    const bed: PlacedBed = {
+      id: `det_bed_${Date.now()}`,
+      label: `Bed ${placedBeds.filter(b => b.material !== 'lawn').length + 1}`,
+      type: 'planted', material, variant, shape,
+      xFt: cx - w / 2 + off, yFt: cy - h / 2 + off, wFt: w, hFt: h,
+    };
+    setPlacedBeds(prev => [...prev, bed]);
+    setSelectedPathId(null);
+    setSelectedBedId(bed.id);
+  };
+  // Accent-bed editor (material + variant, same options as the primary groundcover) — shown inline
+  // beneath the selected bed's row.
+  const accentEditCard = (b: PlacedBed) => (
+    <div className="flex flex-col gap-3 rounded-xl p-3.5" style={{ background: 'rgba(42,42,38,0.06)' }}>
+      <div className="flex items-center gap-2">
+        <span style={{ width: 8, height: 8, borderRadius: 2, background: b.variant ? VARIANT_COLOR[b.variant] : MATERIAL_COLOR[b.material], flexShrink: 0 }} />
+        <span style={{ fontFamily: IT, fontSize: '0.9rem', color: '#2A2A26', fontWeight: 600, flex: 1 }}>{b.label}</span>
+        <button onClick={() => setSelectedBedId(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9A9A92', fontFamily: IT, fontSize: '0.78rem' }}>Done</button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <span style={stepLabelStyle}>Shape</span>
+        <div className="flex gap-1.5">
+          {([{ id: 'rect', label: 'Square' }, { id: 'circle', label: 'Round' }, { id: 'organic', label: 'Organic' }] as { id: ZoneShape; label: string }[]).map(s => {
+            const on = b.shape === s.id;
+            return (
+              <button key={s.id} onClick={() => {
+                // Switch a drawn (poly) or existing bed to a regular shape, sizing it to its current bounds.
+                const patch: Partial<PlacedBed> = { shape: s.id, verts: undefined };
+                if (b.verts && b.verts.length >= 3) {
+                  const xs = b.verts.map(v => v[0]), ys = b.verts.map(v => v[1]);
+                  const x0 = Math.min(...xs), y0 = Math.min(...ys);
+                  patch.xFt = x0; patch.yFt = y0; patch.wFt = Math.max(...xs) - x0; patch.hFt = Math.max(...ys) - y0;
+                }
+                updateBed(b.id, patch);
+              }}
+                className="flex-1 py-2 rounded-full transition-all hover:opacity-90"
+                style={{ fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, cursor: 'pointer',
+                  background: on ? '#2A2A26' : 'white', color: on ? '#efe9db' : '#2A2A26',
+                  border: on ? '1.5px solid #2A2A26' : '1.5px solid rgba(42,42,38,0.14)' }}>
+                {s.label}
+              </button>
+            );
+          })}
         </div>
-      ) : selDetailPath ? (
-        <div className="flex flex-col gap-3 rounded-xl p-3.5" style={{ background: 'rgba(42,42,38,0.06)' }}>
-          <div className="flex items-center justify-between">
-            <span style={{ fontFamily: IT, fontSize: '0.9rem', color: '#2A2A26', fontWeight: 600 }}>{selDetailPath.label}</span>
-            <button onClick={() => setSelectedPathId(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9A9A92', fontFamily: IT, fontSize: '0.78rem' }}>Done</button>
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <span style={stepLabelStyle}>Shape</span>
-            <div className="flex gap-1.5">
-              {(['straight', 'winding'] as PathStyle[]).map(s => (
-                <button key={s} onClick={() => reshapePathById(selDetailPath.id, s)}
-                  className="flex-1 rounded-full px-3 py-1.5 capitalize transition-all"
-                  style={{ background: selDetailPath.style === s ? '#2A2A26' : 'white', color: selDetailPath.style === s ? '#efe9db' : '#6A6A60', fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, border: `1.5px solid ${selDetailPath.style === s ? '#2A2A26' : 'rgba(42,42,38,0.16)'}`, cursor: 'pointer' }}>
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {(selDetailPath.kind ?? 'walkway') !== 'creek' && (
-          <div className="flex flex-col gap-1.5">
-            <span style={stepLabelStyle}>Material</span>
-            <div className="grid grid-cols-2 gap-1.5">
-              {PATH_MATERIALS.map(m => (
-                <button key={m.id} onClick={() => setPathMaterialById(selDetailPath.id, m.id)}
-                  className="flex items-center gap-2 rounded-lg px-2.5 py-2 transition-all"
-                  style={{ background: selDetailPath.material === m.id ? 'white' : 'transparent', border: `1.5px solid ${selDetailPath.material === m.id ? '#2A2A26' : 'rgba(42,42,38,0.14)'}`, cursor: 'pointer' }}>
-                  <span style={{ width: 14, height: 14, borderRadius: 4, background: m.color, flexShrink: 0, border: '1px solid rgba(0,0,0,0.1)' }} />
-                  <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26' }}>{m.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          )}
-
-          <button onClick={() => { setPaths(prev => prev.filter(x => x.id !== selDetailPath.id)); setSelectedPathId(null); }}
-            className="rounded-full px-4 py-2 transition-all hover:opacity-90"
-            style={{ background: 'white', color: '#B4534B', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, border: '1.5px solid rgba(180,83,75,0.3)', cursor: 'pointer' }}>
-            Remove
-          </button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <span style={stepLabelStyle}>Material</span>
+        <div className="flex gap-1.5">
+          {(['mulch', 'rock'] as const).map(m => (
+            <button key={m} onClick={() => updateBed(b.id, { material: m, variant: GROUND_VARIANTS[m][0].id })}
+              className="flex-1 flex items-center justify-center gap-2 rounded-xl px-3 py-2 capitalize transition-all"
+              style={{ background: b.material === m ? 'rgba(47,107,79,0.07)' : 'white', color: '#2A2A26', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, border: `1.5px solid ${b.material === m ? '#2F6B4F' : 'rgba(42,42,38,0.14)'}`, cursor: 'pointer' }}>
+              <span style={{ width: 11, height: 11, borderRadius: 3, background: MATERIAL_COLOR[m], flexShrink: 0 }} />
+              {m}{b.material === m ? ' ✓' : ''}
+            </button>
+          ))}
         </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {([
-            { kind: 'walkway', label: 'Walkway', sub: 'Draw a path to connect spaces', onClick: () => startDetailDraw('walkway') },
-            { kind: 'creek', label: 'Dry creek bed', sub: 'Wind a river-rock bed through the yard', onClick: () => startDetailDraw('creek') },
-          ]).map(o => (
-            <button key={o.kind} onClick={o.onClick}
-              className="flex items-center justify-between gap-2 rounded-xl px-3.5 py-3 transition-all hover:opacity-90"
-              style={{ background: 'white', border: '1.5px solid rgba(42,42,38,0.14)', cursor: 'pointer', textAlign: 'left' }}>
-              <div>
-                <div style={{ fontFamily: IT, fontSize: '0.86rem', color: '#2A2A26', fontWeight: 500 }}>{o.label}</div>
-                <div style={{ fontFamily: IT, fontSize: '0.74rem', color: '#9A9A92' }}>{o.sub}</div>
-              </div>
-              <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 22, height: 22, borderRadius: '50%', background: '#2A2A26', color: '#efe9db', fontSize: '1rem', lineHeight: 1, flexShrink: 0 }}>+</span>
+      </div>
+      {variantsFor(b.material).length > 0 && (
+        <div className="flex gap-1.5">
+          {variantsFor(b.material).map(v => (
+            <button key={v.id} onClick={() => updateBed(b.id, { variant: v.id })}
+              className="flex-1 flex items-center justify-center gap-1.5 rounded-full px-2 py-1 transition-all"
+              style={{ background: b.variant === v.id ? 'white' : 'transparent', color: '#2A2A26', fontFamily: IT, fontSize: '0.72rem', fontWeight: 500, border: `1.5px solid ${b.variant === v.id ? '#2F6B4F' : 'rgba(42,42,38,0.14)'}`, cursor: 'pointer' }}>
+              <span style={{ width: 9, height: 9, borderRadius: 3, background: v.color, flexShrink: 0 }} />
+              {v.label}
             </button>
           ))}
         </div>
       )}
-
-      {paths.length > 0 && (
-        <div className="flex flex-col gap-1.5">
-          <span style={{ fontFamily: IT, fontSize: '0.68rem', color: '#B0B0A6', letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 700 }}>Added</span>
-          {paths.map(p => (
-            <div key={p.id} onClick={() => { if (detailKind) cancelDetailDraw(); setSelectedPathId(p.id); }}
-              className="flex items-center gap-2 rounded-xl px-3 py-2 transition-all"
-              style={{ background: selectedPathId === p.id ? 'white' : 'rgba(42,42,38,0.05)', border: `1.5px solid ${selectedPathId === p.id ? 'rgba(42,42,38,0.16)' : 'transparent'}`, cursor: 'pointer' }}>
-              <span style={{ width: 8, height: 8, borderRadius: 2, background: p.color ?? PATH_COLOR, flexShrink: 0 }} />
-              <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26', flex: 1 }}>{p.label}</span>
-              <button onClick={(e) => { e.stopPropagation(); setPaths(prev => prev.filter(x => x.id !== p.id)); if (selectedPathId === p.id) setSelectedPathId(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0 }}>✕</button>
-            </div>
+      <button onClick={() => { setPlacedBeds(prev => prev.filter(x => x.id !== b.id)); setSelectedBedId(null); }} className="rounded-full px-4 py-2 transition-all hover:opacity-90"
+        style={{ background: 'white', color: '#B4534B', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, border: '1.5px solid rgba(180,83,75,0.3)', cursor: 'pointer' }}>Remove</button>
+    </div>
+  );
+  // Draw-in-progress card for a new walkway/creek (title follows detailKind); only rendered in the
+  // matching section.
+  const pathDrawCard = (
+    <div className="flex flex-col gap-3 rounded-xl p-3.5" style={{ background: 'rgba(42,42,38,0.06)' }}>
+      <div className="flex items-center justify-between">
+        <span style={{ fontFamily: IT, fontSize: '0.9rem', color: '#2A2A26', fontWeight: 600 }}>{detailKind === 'creek' ? 'Dry creek bed' : 'Walkway'}</span>
+        <button onClick={cancelDetailDraw} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9A9A92', fontFamily: IT, fontSize: '0.78rem' }}>Done</button>
+      </div>
+      <p style={{ fontFamily: IT, fontSize: '0.82rem', color: '#6A6A60', margin: 0, lineHeight: 1.5 }}>
+        Click two points on the map to connect them{pathDrawMode === 'picking-end' ? ' — now click the end point.' : '.'}
+      </p>
+      <div className="flex flex-col gap-1.5">
+        <span style={stepLabelStyle}>Shape</span>
+        <div className="flex gap-1.5">
+          {(['straight', 'winding'] as PathStyle[]).map(s => (
+            <button key={s} onClick={() => setDetailStyleLive(s)} className="flex-1 rounded-full px-3 py-1.5 capitalize transition-all"
+              style={{ background: detailStyle === s ? '#2A2A26' : 'white', color: detailStyle === s ? '#efe9db' : '#6A6A60', fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, border: `1.5px solid ${detailStyle === s ? '#2A2A26' : 'rgba(42,42,38,0.16)'}`, cursor: 'pointer' }}>{s}</button>
           ))}
+        </div>
+      </div>
+      {detailMaterialOptions.length > 1 && (
+        <div className="flex flex-col gap-1.5">
+          <span style={stepLabelStyle}>Material</span>
+          <div className="grid grid-cols-2 gap-1.5">
+            {detailMaterialOptions.map(m => (
+              <button key={m.id} onClick={() => setDetailMaterial(m.id)} className="flex items-center gap-2 rounded-lg px-2.5 py-2 transition-all"
+                style={{ background: detailMaterial === m.id ? 'white' : 'transparent', border: `1.5px solid ${detailMaterial === m.id ? '#2A2A26' : 'rgba(42,42,38,0.14)'}`, cursor: 'pointer' }}>
+                <span style={{ width: 14, height: 14, borderRadius: 4, background: m.color, flexShrink: 0, border: '1px solid rgba(0,0,0,0.1)' }} />
+                <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26' }}>{m.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
   );
-
-  // "Groundcovers" panel — primary beds (the open-ground material) + accent beds, as sub-cards.
-  const accentBeds = placedBeds.filter(b => b.id.startsWith('det_bed'));
-  const subCard: React.CSSProperties = { border: '1.5px solid rgba(42,42,38,0.12)', borderRadius: 12, background: 'white', padding: '12px 14px' };
-  const groundcoverPanel = (
-    <div className="flex flex-col gap-3">
-      {/* Primary beds */}
-      <div style={subCard}>
-        <div className="flex items-baseline justify-between gap-2" style={{ marginBottom: 10 }}>
-          <span style={{ fontFamily: IT, fontSize: '0.92rem', fontWeight: 600, color: '#2A2A26' }}>Primary beds</span>
-          <span style={{ fontFamily: IT, fontSize: '0.72rem', color: '#9A9A92', flexShrink: 0 }}>{Math.round(primaryGroundAreaFt).toLocaleString()} sq ft · shown on plan</span>
-        </div>
-        <div style={{ fontFamily: IT, fontSize: '0.66rem', color: '#8A8A7E', letterSpacing: '0.09em', textTransform: 'uppercase', fontWeight: 700, marginBottom: 7 }}>Material</div>
-        <div className="flex gap-1.5" style={{ marginBottom: 8 }}>
-          {(['mulch', 'rock'] as const).map(m => (
-            <button key={m} onClick={() => { setDefaultMaterial(m); setDefaultVariant(GROUND_VARIANTS[m][0].id); }}
-              className="flex-1 flex items-center justify-center gap-2 rounded-xl px-3 py-2 capitalize transition-all"
-              style={{ background: defaultMaterial === m ? 'rgba(47,107,79,0.07)' : 'white', color: '#2A2A26', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, border: `1.5px solid ${defaultMaterial === m ? '#2F6B4F' : 'rgba(42,42,38,0.14)'}`, cursor: 'pointer' }}>
-              <span style={{ width: 11, height: 11, borderRadius: 3, background: MATERIAL_COLOR[m], flexShrink: 0 }} />
-              {m}{defaultMaterial === m ? ' ✓' : ''}
-            </button>
+  // Edit card for the selected path — shown inline beneath its row (so a built item expands to edit).
+  const pathEditCard = selDetailPath ? (
+    <div className="flex flex-col gap-3 rounded-xl p-3.5" style={{ background: 'rgba(42,42,38,0.06)' }}>
+      <div className="flex items-center gap-2">
+        <span style={{ width: 8, height: 8, borderRadius: 2, background: selDetailPath.color ?? PATH_COLOR, flexShrink: 0 }} />
+        <span style={{ fontFamily: IT, fontSize: '0.9rem', color: '#2A2A26', fontWeight: 600, flex: 1 }}>{selDetailPath.label}</span>
+        <button onClick={() => setSelectedPathId(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9A9A92', fontFamily: IT, fontSize: '0.78rem' }}>Done</button>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <span style={stepLabelStyle}>Shape</span>
+        <div className="flex gap-1.5">
+          {(['straight', 'winding'] as PathStyle[]).map(s => (
+            <button key={s} onClick={() => reshapePathById(selDetailPath.id, s)} className="flex-1 rounded-full px-3 py-1.5 capitalize transition-all"
+              style={{ background: selDetailPath.style === s ? '#2A2A26' : 'white', color: selDetailPath.style === s ? '#efe9db' : '#6A6A60', fontFamily: IT, fontSize: '0.78rem', fontWeight: 500, border: `1.5px solid ${selDetailPath.style === s ? '#2A2A26' : 'rgba(42,42,38,0.16)'}`, cursor: 'pointer' }}>{s}</button>
           ))}
         </div>
-        {defaultMaterial && (
-          <div className="flex gap-1.5" style={{ marginBottom: 8 }}>
-            {variantsFor(defaultMaterial).map(v => (
-              <button key={v.id} onClick={() => setDefaultVariant(v.id)}
-                className="flex-1 flex items-center justify-center gap-1.5 rounded-full px-2 py-1 transition-all"
-                style={{ background: defaultVariant === v.id ? 'white' : 'transparent', color: '#2A2A26', fontFamily: IT, fontSize: '0.72rem', fontWeight: 500, border: `1.5px solid ${defaultVariant === v.id ? '#2F6B4F' : 'rgba(42,42,38,0.14)'}`, cursor: 'pointer' }}>
-                <span style={{ width: 9, height: 9, borderRadius: 3, background: v.color, flexShrink: 0 }} />
-                {v.label}
+      </div>
+      {(selDetailPath.kind ?? 'walkway') !== 'creek' && (
+        <div className="flex flex-col gap-1.5">
+          <span style={stepLabelStyle}>Material</span>
+          <div className="grid grid-cols-2 gap-1.5">
+            {PATH_MATERIALS.map(m => (
+              <button key={m.id} onClick={() => setPathMaterialById(selDetailPath.id, m.id)} className="flex items-center gap-2 rounded-lg px-2.5 py-2 transition-all"
+                style={{ background: selDetailPath.material === m.id ? 'white' : 'transparent', border: `1.5px solid ${selDetailPath.material === m.id ? '#2A2A26' : 'rgba(42,42,38,0.14)'}`, cursor: 'pointer' }}>
+                <span style={{ width: 14, height: 14, borderRadius: 4, background: m.color, flexShrink: 0, border: '1px solid rgba(0,0,0,0.1)' }} />
+                <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26' }}>{m.label}</span>
               </button>
             ))}
           </div>
+        </div>
+      )}
+      <button onClick={() => { setPaths(prev => prev.filter(x => x.id !== selDetailPath.id)); setSelectedPathId(null); }} className="rounded-full px-4 py-2 transition-all hover:opacity-90"
+        style={{ background: 'white', color: '#B4534B', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, border: '1.5px solid rgba(180,83,75,0.3)', cursor: 'pointer' }}>Remove</button>
+    </div>
+  ) : null;
+
+  // "Details" panel (merged): primary groundcover up top, then walkways / dry creek beds / accent beds,
+  // each shown like a plant layer (built items + "Add another").
+  const detailsPanel = (
+    <div className="flex flex-col gap-3">
+      {/* Primary groundcover — collapsible card (same pattern as the feature cards). */}
+      <div style={cardShell(groundOpen)}>
+        <button onClick={() => setGroundOpen(o => !o)}
+          className="w-full flex items-center gap-2.5 transition-all hover:opacity-85"
+          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '11px 13px', textAlign: 'left' }}>
+          <span style={CARD_TITLE}>Primary groundcover</span>
+          <span style={CARD_SUMMARY}>{groundSummary}</span>
+          <Chevron open={groundOpen} />
+        </button>
+        {groundOpen && (
+          <div className="px-3.5 pb-3.5 pt-1 flex flex-col gap-2" style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
+
+            <div style={GROUP_LABEL}>Material</div>
+            <div className="flex gap-1.5">
+              {(['mulch', 'rock'] as const).map(m => (
+                <button key={m} onClick={() => { setDefaultMaterial(m); setDefaultVariant(GROUND_VARIANTS[m][0].id); }}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl px-3 py-2 capitalize transition-all"
+                  style={{ background: defaultMaterial === m ? 'rgba(47,107,79,0.07)' : 'white', color: '#2A2A26', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, border: `1.5px solid ${defaultMaterial === m ? '#2F6B4F' : 'rgba(42,42,38,0.14)'}`, cursor: 'pointer' }}>
+                  <span style={{ width: 11, height: 11, borderRadius: 3, background: MATERIAL_COLOR[m], flexShrink: 0 }} />
+                  {m}{defaultMaterial === m ? ' ✓' : ''}
+                </button>
+              ))}
+            </div>
+            {defaultMaterial && (
+              <div className="flex gap-1.5">
+                {variantsFor(defaultMaterial).map(v => (
+                  <button key={v.id} onClick={() => setDefaultVariant(v.id)}
+                    className="flex-1 flex items-center justify-center gap-1.5 rounded-full px-2 py-1 transition-all"
+                    style={{ background: defaultVariant === v.id ? 'white' : 'transparent', color: '#2A2A26', fontFamily: IT, fontSize: '0.72rem', fontWeight: 500, border: `1.5px solid ${defaultVariant === v.id ? '#2F6B4F' : 'rgba(42,42,38,0.14)'}`, cursor: 'pointer' }}>
+                    <span style={{ width: 9, height: 9, borderRadius: 3, background: v.color, flexShrink: 0 }} />
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
-        <p style={{ fontFamily: IT, fontSize: '0.78rem', color: '#8A8A7E', margin: 0, lineHeight: 1.5 }}>
-          Covers all open ground not used by features, lawn, or walkways.
-        </p>
+      </div>
+
+      {/* Walkways */}
+      <div className="flex flex-col gap-2">
+        {detailHeader('Walkways', walkwayPaths.length)}
+        {walkwayPaths.map(p => (
+          <Fragment key={p.id}>
+            {selectedPathId === p.id ? pathEditCard : pathRow(p)}
+          </Fragment>
+        ))}
+        {detailKind === 'walkway'
+          ? pathDrawCard
+          : detailAddBtn(walkwayPaths.length ? 'Add another' : 'Add a walkway', () => startDetailDraw('walkway'))}
+      </div>
+
+      {/* Dry creek beds */}
+      <div className="flex flex-col gap-2">
+        {detailHeader('Dry creek beds', creekPaths.length)}
+        {creekPaths.map(p => (
+          <Fragment key={p.id}>
+            {selectedPathId === p.id ? pathEditCard : pathRow(p)}
+          </Fragment>
+        ))}
+        {detailKind === 'creek'
+          ? pathDrawCard
+          : detailAddBtn(creekPaths.length ? 'Add another' : 'Add a dry creek bed', () => startDetailDraw('creek'))}
       </div>
 
       {/* Accent beds */}
-      <div style={subCard}>
-        <div className="flex items-baseline justify-between gap-2" style={{ marginBottom: accentBeds.length > 0 ? 8 : 6 }}>
-          <span style={{ fontFamily: IT, fontSize: '0.92rem', fontWeight: 600, color: '#2A2A26' }}>Accent beds</span>
-          <span style={{ fontFamily: IT, fontSize: '0.72rem', color: '#9A9A92', flexShrink: 0 }}>{accentBeds.length ? `${accentBeds.length} placed` : 'None yet'}</span>
-        </div>
+      <div className="flex flex-col gap-2">
+        {detailHeader('Accent beds', accentBeds.length)}
         {accentBeds.map(b => (
-          <div key={b.id} className="flex items-center gap-2 rounded-xl px-3 py-2" style={{ background: 'rgba(42,42,38,0.05)', marginBottom: 6 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: b.variant ? VARIANT_COLOR[b.variant] : MATERIAL_COLOR[b.material], flexShrink: 0 }} />
-            <span style={{ fontFamily: IT, fontSize: '0.78rem', color: '#2A2A26', flex: 1 }}>{b.label}</span>
-            <button onClick={() => setPlacedBeds(prev => prev.filter(x => x.id !== b.id))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontFamily: IT, fontSize: '0.75rem', padding: 0 }}>✕</button>
-          </div>
+          <Fragment key={b.id}>
+            {selectedBedId === b.id ? accentEditCard(b) : accentRow(b)}
+          </Fragment>
         ))}
-        {addingBed?.step === 'draw' && addingBed.accent ? (
-          <div className="flex items-center justify-between rounded-xl px-3 py-2" style={{ background: 'rgba(47,107,79,0.06)', border: '1.5px solid rgba(47,107,79,0.3)' }}>
-            <span style={{ fontFamily: IT, fontSize: '0.76rem', color: '#2A2A26' }}>Click points on the plan · double-click to close</span>
-            <button onClick={() => { setAddingBed(null); bedDrawVertsRef.current = []; bedDrawCursorRef.current = null; draw(); }}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9A9A92', fontFamily: IT, fontSize: '0.74rem', padding: 0, flexShrink: 0 }}>✕ Cancel</button>
-          </div>
-        ) : (
-          <button onClick={() => setAddingBed({ step: 'draw', type: 'planted', material: 'mulch', variant: 'natural', accent: true })}
-            className="w-full flex items-center gap-2 rounded-xl px-3 py-2 hover:opacity-80 transition-all"
-            style={{ background: 'rgba(42,42,38,0.03)', border: '1.5px dashed rgba(42,42,38,0.2)', cursor: 'pointer', color: '#7A7A6E', fontFamily: IT, fontSize: '0.78rem', fontWeight: 500 }}>
-            <span style={{ fontSize: '1.05rem', lineHeight: 1 }}>+</span> Draw an accent bed
-          </button>
-        )}
+        {detailAddBtn(accentBeds.length ? 'Add another' : 'Add an accent bed',
+          // Drop a bed in the style's default shape — square for modern, organic otherwise — then the
+          // editor's Shape selector lets the user change it.
+          () => addAccentBed(designStyle === 'modern_structured' ? 'rect' : 'organic'))}
       </div>
     </div>
   );
@@ -3760,6 +4057,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
         const trueIdx = picks[l].findIndex(c => c.id === sp.id);
         return (
         <div key={sp.id} role="button" tabIndex={0}
+          ref={el => { plantCardRefs.current[spName] = el; }}
           onClick={() => toggleSpecies(spName)}
           onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSpecies(spName); } }}
           className="flex items-center gap-2.5 rounded-xl p-2" style={{ background: sel ? '#F4F0E6' : 'white', border: sel ? '2px solid #2A2A26' : '1.5px solid rgba(42,42,38,0.1)', cursor: 'pointer' }}>
@@ -3773,9 +4071,9 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
           <button onClick={e => { e.stopPropagation(); if (trueIdx >= 0) setSwapTarget({ layer: l, idx: trueIdx }); }} title="Swap species"
             className="flex items-center gap-1 transition-all hover:opacity-80"
             style={{ background: 'rgba(61,92,58,0.09)', border: '1.5px solid rgba(61,92,58,0.25)', borderRadius: 999, padding: '4px 9px', cursor: 'pointer', color: '#3d5c3a', fontFamily: IT, fontSize: '0.72rem', fontWeight: 500, flexShrink: 0 }}>
-            ↻ Swap
+            Swap
           </button>
-          {placedPicks[l].length > 1 && <button onClick={e => { e.stopPropagation(); if (trueIdx >= 0) removePick(l, trueIdx); }} title="Remove" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontSize: '0.8rem', padding: '2px 4px', flexShrink: 0 }}>✕</button>}
+          {(l === 'tree' || placedPicks[l].length > 1) && <button onClick={e => { e.stopPropagation(); if (trueIdx >= 0) removePick(l, trueIdx); }} title="Remove" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#B0B0A6', fontSize: '0.8rem', padding: '2px 4px', flexShrink: 0 }}>✕</button>}
         </div>
         );
       })}
@@ -3795,9 +4093,6 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   );
   const plantsPanel = (
     <div className="flex flex-col gap-3">
-      <p style={{ fontFamily: IT, fontSize: '0.9rem', color: '#6A6A60', margin: 0, lineHeight: 1.55 }}>
-        We chose plants suited to your yard's sun, hardiness zone, and style.
-      </p>
 
       {/* Plant density — scales how fully the understory (shrubs + groundcover) fills the beds. */}
       <div className="flex flex-col gap-1">
@@ -3819,22 +4114,20 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
         </div>
       )}
       {plantsLoaded && (
-        <div className="flex flex-col" style={{ border: '1px solid rgba(42,42,38,0.1)', borderRadius: 14, overflow: 'hidden' }}>
+        <div className="flex flex-col gap-2.5">
           {PLANT_GROUPS.map((grp, i) => {
             const isOpen = plantGroupOpen === i;
             const count = grp.layers.reduce((a, l) => a + placedPicks[l].length, 0);
             return (
-              <div key={grp.title}>
-                {i > 0 && <div style={{ borderTop: '1px solid rgba(42,42,38,0.1)' }} />}
-                <button onClick={() => setPlantGroupOpen(isOpen ? -1 : i)} className="w-full flex items-center gap-2.5 px-3.5 py-3 transition-all hover:opacity-80"
-                  style={{ background: isOpen ? 'rgba(42,42,38,0.04)' : 'none', border: 'none', cursor: 'pointer' }}>
-                  <div style={{ width: 24, height: 24, borderRadius: '50%', background: isOpen ? '#2A2A26' : 'rgba(42,42,38,0.1)', color: isOpen ? 'white' : '#9A9A92', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: IT, fontSize: '0.72rem', fontWeight: 600, flexShrink: 0 }}>{i + 1}</div>
-                  <span style={{ fontFamily: IT, fontSize: '0.85rem', color: '#2A2A26', fontWeight: 500, textAlign: 'left' }}>{grp.title}</span>
-                  {!isOpen && count > 0 && <span style={{ fontFamily: IT, fontSize: '0.72rem', color: '#9A9A92' }}>· {count}</span>}
-                  <span className="ml-auto" style={{ fontFamily: IT, fontSize: '0.78rem', color: '#B0B0A6' }}>{isOpen ? '▾' : '▸'}</span>
+              <div key={grp.title} style={cardShell(isOpen)}>
+                <button onClick={() => setPlantGroupOpen(isOpen ? -1 : i)} className="w-full flex items-center gap-2.5 transition-all hover:opacity-85"
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '11px 13px', textAlign: 'left' }}>
+                  <span style={CARD_TITLE}>{grp.title}</span>
+                  <span style={CARD_SUMMARY}>{count > 0 ? count : ''}</span>
+                  <Chevron open={isOpen} />
                 </button>
                 {isOpen && (
-                  <div className="px-3.5 pb-3.5 pt-2 flex flex-col gap-2" style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
+                  <div className="px-3.5 pb-3.5 pt-1 flex flex-col gap-2" style={{ borderTop: '1px solid rgba(42,42,38,0.08)' }}>
                     {grp.layers.map(l => renderPlantLayer(l, grp.layers.length > 1))}
                   </div>
                 )}
@@ -3885,11 +4178,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
           </div>
         )}
         <div className="flex gap-2.5 justify-between">
-          <button onClick={() => navigate('/diy/plan-ready')}
-            className="rounded-full px-6 py-3 transition-all hover:opacity-90"
-            style={{ background: 'white', color: '#2A2A26', fontFamily: IT, fontSize: '0.88rem', fontWeight: 500, border: '1.5px solid rgba(42,42,38,0.16)', cursor: 'pointer', flexShrink: 0 }}>
-            ← Back
-          </button>
+          <BackButton onClick={() => navigate('/diy/plan-ready')} style={{ flexShrink: 0 }} />
           <button onClick={() => { if (!blocked) navigate('/diy/review'); }} disabled={blocked}
             className="rounded-full px-5 py-2.5 transition-all hover:opacity-90"
             style={{ background: blocked ? 'rgba(42,42,38,0.14)' : '#2A2A26', color: blocked ? '#8F8F86' : '#efe9db', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, border: 'none', cursor: blocked ? 'default' : 'pointer', flexShrink: 0 }}>
@@ -3911,10 +4200,6 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
   return (
     <div className="h-screen flex flex-col" style={{ backgroundColor: illustrative ? '#F4F0E6' : '#E7E1D5', overflow: 'hidden', paddingTop: illustrative ? 0 : '2rem' }}>
 
-      {/* Sun onboarding: dim the rest of the UI so the popup + "Sun layer" button stand out. */}
-      {sunOnboard && (
-        <div onClick={dismissSunOnboard} style={{ position: 'fixed', inset: 0, zIndex: 40, background: 'rgba(20,18,12,0.34)', cursor: 'pointer' }} />
-      )}
 
       {/* Plant swap popup — choose an alternative species for the selected slot. */}
       {swapTarget && (() => {
@@ -3963,12 +4248,12 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
                     return (
                       <button key={sp.id} disabled={inUse} onClick={() => applySwap(swapTarget.layer, swapTarget.idx, sp)}
                         className="transition-all hover:opacity-95 disabled:opacity-45"
-                        style={{ position: 'relative', aspectRatio: '1 / 1', background: 'white', borderRadius: 12, overflow: 'hidden', cursor: inUse ? 'default' : 'pointer', border: `2px solid ${isCurrent ? '#3d5c3a' : 'rgba(42,42,38,0.1)'}`, padding: 0 }}>
+                        style={{ position: 'relative', aspectRatio: '1 / 1', background: 'white', borderRadius: 12, overflow: 'hidden', cursor: inUse ? 'default' : 'pointer', border: `2px solid ${isCurrent ? GREEN : 'rgba(42,42,38,0.1)'}`, padding: 0 }}>
                         <div style={{ position: 'absolute', inset: 0 }}>
                           <PlantImage url={sp.image_url} kind={THUMB_KIND[swapTarget.layer]} seed={sp.id} />
                         </div>
                         {(isCurrent || inUse) && (
-                          <span style={{ position: 'absolute', top: 7, right: 7, fontFamily: IT, fontSize: '0.62rem', fontWeight: 600, color: 'white', background: isCurrent ? '#3d5c3a' : 'rgba(42,42,38,0.6)', borderRadius: 999, padding: '2px 7px' }}>{isCurrent ? 'Current' : 'In use'}</span>
+                          <span style={{ position: 'absolute', top: 7, right: 7, fontFamily: IT, fontSize: '0.62rem', fontWeight: 600, color: 'white', background: isCurrent ? GREEN : 'rgba(42,42,38,0.6)', borderRadius: 999, padding: '2px 7px' }}>{isCurrent ? 'Current' : 'In use'}</span>
                         )}
                         {/* Name overlaid on the image with a bottom scrim. */}
                         <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: '18px 10px 8px', textAlign: 'left', background: 'linear-gradient(to top, rgba(20,18,12,0.72), rgba(20,18,12,0))' }}>
@@ -4023,10 +4308,9 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
                 <Logo />
               </div>
               <div style={{ marginTop: '1.5rem', marginBottom: '0.9rem' }}>
-                <h1 style={{ fontFamily: IS, fontSize: '1.9rem', color: '#274435', margin: '0.3rem 0 0', lineHeight: 1.05, fontWeight: 400, fontStyle: 'italic' }}>Review your plan</h1>
-                <p style={{ fontFamily: IT, fontSize: '0.85rem', color: '#6A6A60', margin: '0.5rem 0 0', lineHeight: 1.5 }}>
-                  Open each section to fine-tune it. Finish when everything checks out.
-                </p>
+                <h1 style={{ fontFamily: IS, fontSize: '4rem', color: INK, margin: '0.3rem 0 0', lineHeight: 1.05, fontWeight: 400 }}>
+                  Your {yardType === 'back' ? 'backyard ' : yardType === 'front' ? 'front yard ' : ''}plan
+                </h1>
               </div>
             </div>
           )}
@@ -4068,8 +4352,12 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
                     if (!total) return null;
                     return { text: `${total} feature${total !== 1 ? 's' : ''}`, tone: 'neutral' as const };
                   }
-                  if (stepId === 'details') return paths.length ? { text: `${paths.length} added`, tone: 'neutral' as const } : null;
-                  if (stepId === 'groundcover') return defaultMaterial ? { text: `${defaultMaterial.charAt(0).toUpperCase()}${defaultMaterial.slice(1)}${accentBeds.length ? ` · ${accentBeds.length} bed${accentBeds.length !== 1 ? 's' : ''}` : ''}`, tone: 'neutral' as const } : { text: 'Not set', tone: 'neutral' as const };
+                  if (stepId === 'details') {
+                    const added = paths.length + accentBeds.length;
+                    const mat = defaultMaterial ? `${defaultMaterial.charAt(0).toUpperCase()}${defaultMaterial.slice(1)}` : null;
+                    const parts = [mat, added ? `${added} added` : null].filter(Boolean);
+                    return parts.length ? { text: parts.join(' · '), tone: 'neutral' as const } : null;
+                  }
                   if (stepId === 'plants') return plantsLoaded ? { text: `${placedTotalSpecies} species · ${Object.keys(plantPositions).length} plants`, tone: 'neutral' as const } : { text: 'Choosing…', tone: 'neutral' as const };
                   return null;
                 })();
@@ -4641,19 +4929,14 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
                       </div>
                     )}
 
-                    {/* ── Details step ── */}
+                    {/* ── Details step (groundcover + walkways + creeks + accent beds) ── */}
                     {stepId === 'details' && isOpen && illustrative && (
-                      <div className="px-7 pb-2 pt-5">{detailsPanel}</div>
-                    )}
-
-                    {/* ── Groundcovers section ── */}
-                    {stepId === 'groundcover' && isOpen && illustrative && (
-                      <div className="px-4 pb-4 pt-1">{groundcoverPanel}</div>
+                      <div className="px-7 pb-4 pt-1">{detailsPanel}</div>
                     )}
 
                     {/* ── Plants step ── */}
                     {stepId === 'plants' && isOpen && illustrative && (
-                      <div className="px-7 pb-2 pt-5">{plantsPanel}</div>
+                      <div className="px-7 pb-4 pt-5">{plantsPanel}</div>
                     )}
 
                     {/* ── Privacy step ── */}
@@ -4777,6 +5060,11 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
                 style={{ top: 18, left: 18, zIndex: 11, background: '#2A2A26', color: '#efe9db', borderRadius: 999, padding: '9px 16px', boxShadow: '0 2px 10px rgba(0,0,0,0.12)', fontFamily: IT, fontSize: '0.78rem', fontWeight: 600, border: 'none', cursor: 'pointer' }}>
                 View street view
               </button>
+              {/* Autosave status — sits just right of the street-view button; renders
+                  nothing unless a signed-in user with an active design is editing. */}
+              <div className="absolute" style={{ top: 20, left: 170, zIndex: 11 }}>
+                <SaveStatusChip status={saveStatus} />
+              </div>
               {/* Sun layer toggle — introduced by the onboarding popup, then always available. */}
               {sunMap && (
                 <button onClick={() => setShowSun(s => !s)} title="Toggle the sun/shade layer"
@@ -4789,39 +5077,95 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
                   ☀ Sun layer
                 </button>
               )}
-              {/* Sun interstitial — a one-time walkthrough of the sun analysis, shown over the plan
-                  (with the heatmap live behind it) before the user starts editing. */}
-              {sunMap && sunOnboard && (
-                <div className="absolute inset-0 flex items-center justify-center" style={{ zIndex: 50, padding: 24 }}>
-                  <div className="flex flex-col gap-4" style={{ width: 420, maxWidth: '94%', background: '#F4F0E6', borderRadius: 20, padding: '28px 30px 24px', boxShadow: '0 24px 80px rgba(0,0,0,0.35)' }}>
-                    <div>
-                      <span style={{ fontFamily: IT, fontSize: '0.7rem', color: '#9A9A92', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700 }}>Before you dig in</span>
-                      <h2 style={{ fontFamily: IS, fontSize: '1.7rem', color: '#2A2A26', margin: '6px 0 0', fontWeight: 400, lineHeight: 1.1 }}>We analyzed your sunlight</h2>
-                    </div>
-                    <p style={{ fontFamily: IT, fontSize: '0.9rem', color: '#6A6A60', margin: 0, lineHeight: 1.55 }}>
-                      Using your home, trees, and structures, we modeled how the sun moves across your yard — it's showing on the plan behind this card.
+              {/* Global reset — revert the whole plan to the originally generated layout (confirms first). */}
+              <button onClick={() => setShowResetConfirm(true)}
+                title="Revert to the originally generated plan"
+                className="absolute flex items-center gap-1.5 transition-all hover:opacity-90"
+                style={{ top: 18, right: sunMap ? 136 : 18, zIndex: 11, borderRadius: 999, padding: '7px 14px', cursor: 'pointer',
+                  fontFamily: IT, fontSize: '0.75rem', fontWeight: 600, background: 'white', color: '#2A2A26',
+                  border: '1.5px solid rgba(42,42,38,0.16)', boxShadow: '0 2px 10px rgba(0,0,0,0.12)' }}>
+                ↺ Reset plan
+              </button>
+              {/* Reset confirmation screen — a blocking modal before the destructive revert. */}
+              {showResetConfirm && (
+                <div role="dialog" aria-modal="true" onClick={() => setShowResetConfirm(false)}
+                  style={{ position: 'fixed', inset: 0, zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(42,42,38,0.45)', padding: '1.5rem' }}>
+                  <div onClick={e => e.stopPropagation()}
+                    style={{ background: '#efe9db', borderRadius: 20, maxWidth: 420, width: '100%', padding: '2.2rem 2.2rem 1.8rem', boxShadow: '0 20px 60px rgba(0,0,0,0.28)', border: '1px solid rgba(42,42,38,0.08)' }}>
+                    <h2 style={{ fontFamily: IS, fontSize: '2rem', color: '#2A2A26', fontWeight: 400, lineHeight: 1.1, margin: 0 }}>Reset your plan?</h2>
+                    <p style={{ fontFamily: IT, fontSize: '0.95rem', color: '#5A5A50', lineHeight: 1.5, margin: '0.9rem 0 1.6rem' }}>
+                      This reverts every feature, bed, and walkway to the originally generated layout. All your edits will be lost.
                     </p>
-                    {sunBrightPct != null && (
-                      <p style={{ fontFamily: IT, fontSize: '0.95rem', color: '#2A2A26', margin: 0, fontWeight: 700 }}>
-                        About {sunBrightPct}% of your yard gets full sun.
-                      </p>
+                    <div className="flex flex-col" style={{ gap: '0.7rem' }}>
+                      <button onClick={() => { resetToGenerated(); setShowResetConfirm(false); }} className="transition-all hover:opacity-90"
+                        style={{ width: '100%', background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500, border: 'none', borderRadius: 999, padding: '0.85rem 1.6rem', cursor: 'pointer', textAlign: 'center' }}>
+                        Reset to generated plan
+                      </button>
+                      <button onClick={() => setShowResetConfirm(false)} className="transition-all hover:opacity-85"
+                        style={{ width: '100%', background: 'white', color: '#2A2A26', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500, border: '1.5px solid rgba(42,42,38,0.16)', borderRadius: 999, padding: '0.85rem 1.6rem', cursor: 'pointer', textAlign: 'center' }}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {/* First-run tour — a short multi-step walkthrough over the plan (heatmap live behind the
+                  sun step). The scrim covers only the plan, so the sidebar section each step opens stays
+                  bright and visible beside the card. */}
+              {inTour && onboardStep && (
+                <div className="absolute inset-0 flex items-center justify-center" style={{ zIndex: 50, padding: 24 }}>
+                  <div className="absolute inset-0" style={{ background: 'rgba(20,18,12,0.30)' }} />
+                  <div className="relative flex flex-col gap-4" style={{ width: 430, maxWidth: '94%', background: '#F4F0E6', borderRadius: 20, padding: '26px 30px 22px', boxShadow: '0 24px 80px rgba(0,0,0,0.35)' }}>
+                    <div>
+                      <span style={{ fontFamily: IT, fontSize: '0.7rem', color: '#9A9A92', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700 }}>{onboardStep.eyebrow} · {onboardIdx + 1} of {ONBOARD_STEPS.length}</span>
+                      <h2 style={{ fontFamily: IS, fontSize: '1.65rem', color: '#2A2A26', margin: '6px 0 0', fontWeight: 400, lineHeight: 1.1 }}>{onboardStep.title}</h2>
+                    </div>
+                    <p style={{ fontFamily: IT, fontSize: '0.9rem', color: '#6A6A60', margin: 0, lineHeight: 1.55 }}>{onboardStep.intro}</p>
+                    {onboardStep.intro2 && (
+                      <p style={{ fontFamily: IT, fontSize: '0.9rem', color: '#6A6A60', margin: 0, lineHeight: 1.55 }}>{onboardStep.intro2}</p>
                     )}
-                    <div className="flex flex-col gap-1.5">
-                      <div style={{ height: 10, borderRadius: 999, background: 'linear-gradient(90deg, #5B7FA6, #A9B36E, #F4C542)' }} />
-                      <div className="flex justify-between" style={{ fontFamily: IT, fontSize: '0.7rem', color: '#9A9A92', fontWeight: 500 }}>
-                        <span>Shade (&lt;3 hrs)</span><span>Full sun (6+ hrs)</span>
+                    {onboardStep.key === 'sun' && (
+                      <>
+                        {sunBrightPct != null && (
+                          <p style={{ fontFamily: IT, fontSize: '0.95rem', color: '#2A2A26', margin: 0, fontWeight: 700 }}>{sunBrightPct}% of your yard gets full sun.</p>
+                        )}
+                        <div className="flex flex-col gap-1.5">
+                          <div style={{ height: 10, borderRadius: 999, background: 'linear-gradient(90deg, #5B7FA6, #A9B36E, #F4C542)' }} />
+                          <div className="flex justify-between" style={{ fontFamily: IT, fontSize: '0.7rem', color: '#9A9A92', fontWeight: 500 }}>
+                            <span>Shade (&lt;3 hrs)</span><span>Full sun (6+ hrs)</span>
+                          </div>
+                        </div>
+                        <p style={{ fontFamily: IT, fontSize: '0.9rem', color: '#6A6A60', margin: 0, lineHeight: 1.55 }}>
+                          Sunlight informs your feature and plant placement. View the sun layer at any time by hitting the <strong style={{ color: '#2A2A26' }}>☀ Sun layer</strong> button in the top right of your plan.
+                        </p>
+                      </>
+                    )}
+                    {onboardStep.bullets.length > 0 && (
+                      <div className="flex flex-col gap-2" style={{ fontFamily: IT, fontSize: '0.85rem', color: '#6A6A60', lineHeight: 1.5 }}>
+                        {onboardStep.bullets.map((b, i) => (
+                          <div key={i} className="flex gap-2.5"><span style={{ flexShrink: 0 }}>{b.icon}</span><span>{b.text}</span></div>
+                        ))}
                       </div>
+                    )}
+                    {/* Progress dots */}
+                    <div className="flex items-center justify-center gap-1.5" style={{ marginTop: 2 }}>
+                      {ONBOARD_STEPS.map((_, i) => (
+                        <span key={i} style={{ width: i === onboardIdx ? 18 : 6, height: 6, borderRadius: 999, background: i === onboardIdx ? '#2F6B4F' : 'rgba(42,42,38,0.18)', transition: 'all 0.2s' }} />
+                      ))}
                     </div>
-                    <div className="flex flex-col gap-2" style={{ fontFamily: IT, fontSize: '0.85rem', color: '#6A6A60', lineHeight: 1.5 }}>
-                      <div className="flex gap-2.5"><span style={{ flexShrink: 0 }}>☀️</span><span>It shaped this layout — seating leans toward shade, the veggie garden toward full sun.</span></div>
-                      <div className="flex gap-2.5"><span style={{ flexShrink: 0 }}>🌿</span><span>It decides which plants we'll recommend, so everything thrives where it's planted.</span></div>
-                      <div className="flex gap-2.5"><span style={{ flexShrink: 0 }}>👀</span><span>View it any time — tap the <strong style={{ color: '#2A2A26' }}>☀ Sun layer</strong> button at the top-right of the plan.</span></div>
+                    {/* Navigation */}
+                    <div className="flex items-center gap-2">
+                      <button onClick={endTour} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9A9A92', fontFamily: IT, fontSize: '0.82rem', fontWeight: 500 }}>Skip tour</button>
+                      <div style={{ flex: 1 }} />
+                      {onboardIdx > 0 && (
+                        <button onClick={backOnboard} className="rounded-full transition-all hover:opacity-80"
+                          style={{ background: 'white', color: '#2A2A26', fontFamily: IT, fontSize: '0.86rem', fontWeight: 500, border: '1.5px solid rgba(42,42,38,0.16)', cursor: 'pointer', padding: '9px 18px' }}>Back</button>
+                      )}
+                      <button onClick={nextOnboard} className="rounded-full transition-all hover:opacity-90"
+                        style={{ background: '#2F6B4F', color: 'white', fontFamily: IT, fontSize: '0.86rem', fontWeight: 500, border: 'none', cursor: 'pointer', padding: '9px 20px' }}>
+                        {onboardIdx >= ONBOARD_STEPS.length - 1 ? 'Start designing' : 'Next'}
+                      </button>
                     </div>
-                    <button onClick={dismissSunOnboard}
-                      className="rounded-full py-3 transition-all hover:opacity-90"
-                      style={{ background: '#2F6B4F', color: 'white', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
-                      Got it — show me my plan
-                    </button>
                   </div>
                 </div>
               )}
@@ -4953,11 +5297,7 @@ export default function DiyPlacementPage({ illustrative = false }: { illustrativ
 
       {/* Fixed nav (satellite editor only — illustrative uses the sidebar footer) */}
       {!illustrative && (<>
-      <button onClick={() => navigate('/diy/boundary')}
-        className="fixed bottom-8 left-10 transition-all hover:opacity-70"
-        style={{ color: '#7A7A73', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-        ← back
-      </button>
+      <BackButton onClick={() => navigate('/diy/boundary')} className="fixed bottom-8 left-10" />
       <button onClick={() => navigate('/diy/review')}
         className="fixed bottom-8 right-10 flex items-center gap-2.5 px-7 py-3.5 rounded-full transition-all hover:opacity-90"
         style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>

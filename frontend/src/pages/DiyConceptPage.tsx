@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
+import BackButton from '../components/BackButton';
 import { generateLandscapeConcept, type GenerateConceptParams } from '../services/geminiService';
 
-const IT = "'Inter Tight', sans-serif";
-const IS = "'Instrument Serif', serif";
+import { IS, IT, PAGE_BG } from '../lib/theme';
 
 const LOADING_MESSAGES = [
   'Analyzing your yard…',
@@ -124,7 +124,7 @@ export default function DiyConceptPage() {
   const next = () => setActiveIdx(i => (i + 1) % 3);
 
   return (
-    <div className="h-screen flex flex-col" style={{ backgroundColor: '#efe9db', overflow: 'hidden' }}>
+    <div className="h-screen flex flex-col" style={{ backgroundColor: PAGE_BG, overflow: 'hidden' }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
       <div className="flex items-start px-10 pt-8 mb-6 flex-shrink-0">
@@ -276,11 +276,8 @@ export default function DiyConceptPage() {
         </div>
       )}
 
-      <button onClick={() => navigate(-1)}
-        className="fixed bottom-8 left-10 hover:opacity-70 transition-all"
-        style={{ fontFamily: IT, fontSize: '0.85rem', color: '#7A7A73', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-        ← back
-      </button>
+      <BackButton onClick={() => navigate(-1)}
+        className="fixed bottom-8 left-10" />
 
       {anyReady && (
         <button

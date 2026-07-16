@@ -15,9 +15,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { paintElevation } from '../lib/elevationPainter';
 import { preloadSpeciesSprites } from '../lib/elevationSprites';
 import { planContentHash } from '../lib/planSignature';
+import { IT } from '../lib/theme';
 
 const PAPER_BG = '#f6f1e6';
-const IT = "'Inter Tight', sans-serif";
 
 // Offscreen source dimensions — the PNG inherits this backing store, so a big source
 // yields a crisp picture regardless of on-page display size.

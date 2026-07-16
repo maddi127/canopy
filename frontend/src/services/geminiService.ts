@@ -2,7 +2,10 @@ import * as turf from '@turf/turf';
 import { PLANTS } from '../features/planting/plantDatabase';
 import type { ExtractedFeature } from './planTranslationService';
 
-const GEMINI_API_KEY    = import.meta.env.VITE_GEMINI_API_KEY || '';
+// Direct-to-Google is DEV-ONLY: gating on import.meta.env.DEV lets Vite
+// statically eliminate the key and the direct-URL branch from production
+// bundles, so a VITE_GEMINI_API_KEY accidentally set in Netlify can't leak.
+const GEMINI_API_KEY    = import.meta.env.DEV ? (import.meta.env.VITE_GEMINI_API_KEY || '') : '';
 const GOOGLE_MAPS_KEY   = import.meta.env.VITE_GOOGLE_MAPS_KEY || '';
 const IMAGE_MODEL = 'gemini-2.5-flash-image';
 const TEXT_MODEL  = 'gemini-2.0-flash';
@@ -11,9 +14,14 @@ const TEXT_MODEL  = 'gemini-2.0-flash';
 // go through the Netlify Function proxy. In local dev, a VITE_GEMINI_API_KEY in
 // .env makes calls go straight to Google so `vite dev` works without netlify dev.
 const geminiUrl = (model: string) =>
-  GEMINI_API_KEY
+  import.meta.env.DEV && GEMINI_API_KEY
     ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
     : `/.netlify/functions/gemini?model=${model}`;
+// The key header only exists on the dev direct path — never sent to the proxy.
+const GEMINI_HEADERS: Record<string, string> =
+  import.meta.env.DEV && GEMINI_API_KEY
+    ? { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY }
+    : { 'Content-Type': 'application/json' };
 const IMAGE_API_URL = geminiUrl(IMAGE_MODEL);
 const TEXT_API_URL  = geminiUrl(TEXT_MODEL);
 
@@ -428,7 +436,7 @@ ${lawnRule}
 
   const res = await fetch(IMAGE_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify(body),
   });
 
@@ -465,7 +473,7 @@ export async function detectHardscapes(photoDataUrl: string): Promise<HardscapeZ
 
   const res = await fetch(TEXT_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
     }),
@@ -558,7 +566,7 @@ export async function detectAerialSiteFeatures(
 
   const res = await fetch(TEXT_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{ parts: [
         { text: prompt },
@@ -904,7 +912,7 @@ export async function detectMaterialZones(params: {
 
   const res = await fetch(TEXT_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
     }),
@@ -1040,7 +1048,7 @@ export async function locateFeatures(params: {
 
   const res = await fetch(TEXT_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
     }),
@@ -1522,7 +1530,7 @@ export async function extractHousePixelAnchors(params: {
 
   const res = await fetch(TEXT_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
     }),
@@ -2201,7 +2209,7 @@ export async function dualGridExtractZones(params: {
 
   const res = await fetch(TEXT_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{
         parts: [
@@ -2578,7 +2586,7 @@ async function checkHardRules(imageBase64: string, imageMimeType: string): Promi
   try {
     const res = await fetch(TEXT_API_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+      headers: GEMINI_HEADERS,
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: imageMimeType, data: imageBase64 } }] }],
       }),
@@ -2896,7 +2904,7 @@ export async function generateLandscapeConcept(params: GenerateConceptParams): P
 
     const genRes = await fetch(IMAGE_API_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+      headers: GEMINI_HEADERS,
       body: JSON.stringify({
         contents: [{ parts: [{ text: buildImagePrompt(detectedHardscapes, clarifyingSuffix) }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
         generationConfig: { responseModalities: ['IMAGE'] },
@@ -2948,7 +2956,7 @@ export async function generateLandscapeConcept(params: GenerateConceptParams): P
 
       const textRes = await fetch(TEXT_API_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+        headers: GEMINI_HEADERS,
         body: JSON.stringify({
           contents: [{ parts: [{ text: analysisPrompt }, { inline_data: { mime_type: imagePart.inlineData.mimeType, data: imagePart.inlineData.data } }] }],
         }),
@@ -3044,7 +3052,7 @@ export async function getConceptColorMask(
 
   const res = await fetch(IMAGE_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
       generationConfig: { responseModalities: ['IMAGE'] },
@@ -3081,7 +3089,7 @@ export async function detectWalkwayStraightness(conceptImageDataUrl: string): Pr
 
   const res = await fetch(TEXT_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
     }),
@@ -3135,7 +3143,7 @@ export async function detectTreeTrunks(
 
   const res = await fetch(TEXT_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
     }),
@@ -3207,7 +3215,7 @@ export async function extractFeaturesFromConcept(
 
   const res = await fetch(TEXT_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{
         parts: [
@@ -3442,7 +3450,7 @@ CRITICAL RULES:
 
   const res = await fetch(IMAGE_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+    headers: GEMINI_HEADERS,
     body: JSON.stringify({
       contents: [{
         parts: [
@@ -3641,7 +3649,7 @@ export async function detectSiteFeatures(
   try {
     const res = await fetch(VISION_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+      headers: GEMINI_HEADERS,
       body: JSON.stringify({
         contents: [{ parts: [
           { text: prompt },

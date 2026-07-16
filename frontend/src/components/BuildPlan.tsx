@@ -4,9 +4,8 @@
 import { useMemo } from 'react';
 import { buildWeekendPlan } from '../services/materialsCalculator';
 import type { PlantInstance } from '../services/draftPlants';
+import { IS, IT } from '../lib/theme';
 
-const IS = "'Instrument Serif', serif";
-const IT = "'Inter Tight', sans-serif";
 const DARK = '#2A2A26';
 const money = (n: number) => `$${n.toLocaleString()}`;
 

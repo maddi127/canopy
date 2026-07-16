@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
+import BackButton from '../components/BackButton';
 
-const IT = "'Inter Tight', sans-serif";
-const IS = "'Instrument Serif', serif";
+import { IS, IT, PAGE_BG } from '../lib/theme';
 
 interface PaymentRecord {
   projectId: string;
@@ -84,7 +84,7 @@ export default function PaymentPage({ nextPath }: { nextPath?: string } = {}) {
   };
 
   return (
-    <div className="min-h-screen flex flex-col pt-8 pb-16" style={{ backgroundColor: '#efe9db' }}>
+    <div className="min-h-screen flex flex-col pt-8 pb-16" style={{ backgroundColor: PAGE_BG }}>
 
       {/* Logo */}
       <div className="flex items-start justify-between px-10 mb-6 flex-shrink-0">
@@ -214,13 +214,10 @@ export default function PaymentPage({ nextPath }: { nextPath?: string } = {}) {
       </button>
 
       {/* Back */}
-      <button
+      <BackButton
         onClick={() => navigate(-1)}
-        className="fixed bottom-8 left-10 hover:opacity-70 transition-all"
-        style={{ fontFamily: IT, fontSize: '0.85rem', color: '#7A7A73', fontWeight: 500 }}
-      >
-        ← back
-      </button>
+        className="fixed bottom-8 left-10"
+      />
     </div>
   );
 }

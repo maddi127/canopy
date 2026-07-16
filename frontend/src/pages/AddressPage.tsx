@@ -2,12 +2,10 @@ import { useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
 import AddressInput from '../features/onboarding/AddressInput';
-import { clearLocalState } from '../services/projectsService';
+import { clearAllDesignState } from '../services/projectsService';
+import { IS, IT, INK, PAGE_BG } from '../lib/theme';
 
-const BG = '#efe9db';
-const DARK = '#1a1a16';
-const IS = "'Instrument Serif', serif";
-const IT = "'Inter Tight', sans-serif";
+const DARK = INK;
 
 /**
  * Address-capture step shown before preferences for anyone who starts a plan
@@ -19,7 +17,7 @@ export default function AddressPage() {
 
   const handleAddressSelect = useCallback(
     (address: string, lat: number, lng: number) => {
-      clearLocalState();
+      clearAllDesignState();
       localStorage.setItem('initialAddress', JSON.stringify({ address, lat, lng }));
       localStorage.setItem('siteContext', JSON.stringify({ address, lat, lng }));
       navigate('/diy/preferences');
@@ -28,7 +26,7 @@ export default function AddressPage() {
   );
 
   return (
-    <div className="min-h-screen flex flex-col pt-8" style={{ backgroundColor: BG, fontFamily: IT }}>
+    <div className="min-h-screen flex flex-col pt-8" style={{ backgroundColor: PAGE_BG, fontFamily: IT }}>
       {/* Header — matches the preferences flow (logo top-left) */}
       <div className="flex items-center px-10">
         <Link to="/"><Logo /></Link>

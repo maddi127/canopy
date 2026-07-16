@@ -7,8 +7,8 @@ import {
   buildPlantClusters, paintPlantClusters, paintSketchFeaturePoly, paintSketchGroundFill,
   paintLawnMowerArcs, paintPathEdges, paintPathBody, darkenHex, type PlantMarker, type Layer,
 } from '../lib/planPainter';
+import { IT } from '../lib/theme';
 
-const IT = "'Inter Tight', sans-serif";
 type Ring = [number, number][];
 type Affine = { a: number; b: number; c: number; d: number; e: number; f: number };
 

@@ -8,7 +8,9 @@
 // Dependency-light on purpose: fetch + localStorage only. NO imports from pages or
 // components — services importing pages has broken vitest before.
 
-const GEMINI_API_KEY  = import.meta.env.VITE_GEMINI_API_KEY   || '';
+// Dev-only key: the import.meta.env.DEV gate lets Vite strip the key and the
+// direct-to-Google branch out of production bundles entirely.
+const GEMINI_API_KEY  = import.meta.env.DEV ? (import.meta.env.VITE_GEMINI_API_KEY || '') : '';
 const GOOGLE_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY   || '';
 const VISION_MODEL    = 'gemini-2.5-flash';
 
@@ -16,10 +18,15 @@ const VISION_MODEL    = 'gemini-2.5-flash';
 // calls straight to Google; in prod the key lives on the server so calls go via the
 // Netlify Function proxy.
 const geminiUrl = (model: string) =>
-  GEMINI_API_KEY
+  import.meta.env.DEV && GEMINI_API_KEY
     ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
     : `/.netlify/functions/gemini?model=${model}`;
 const VISION_API_URL = geminiUrl(VISION_MODEL);
+// The key header only exists on the dev direct path — never sent to the proxy.
+const GEMINI_HEADERS: Record<string, string> =
+  import.meta.env.DEV && GEMINI_API_KEY
+    ? { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY }
+    : { 'Content-Type': 'application/json' };
 
 const CACHE_KEY = 'diyStreetView';
 const PHOTO_KEY = 'diyStreetViewPhoto';
@@ -28,6 +35,14 @@ const PHOTO_KEY = 'diyStreetViewPhoto';
 // so a stale cache entry is treated as a miss and refetched once rather than served
 // with the new fields silently missing.
 const CACHE_VERSION = 2;
+
+// Street View analysis is PARKED for now. Its live payoff is thin relative to the per-session Gemini
+// vision call: the only clearly user-visible consumer today is the side-gate walkway (and only when a
+// gate is detected); the mailbox/porch beds are dormant (accent beds disabled) and the roof-type only
+// shows on the standalone /diy/yard-3d page. When `false`: the boundary page skips the fetch and the
+// input signature ignores any (possibly stale) diyStreetView entry. Flip to `true` to re-enable once
+// the dormant consumers (accent beds, 3D) are back in the main flow — no other code changes needed.
+export const STREET_VIEW_ENABLED = false;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -336,7 +351,7 @@ async function runVision(dataUrls: string[]): Promise<StreetInsights | null> {
   try {
     res = await fetch(VISION_API_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+      headers: GEMINI_HEADERS,
       body: JSON.stringify(body),
     });
   } catch {

@@ -39,6 +39,10 @@ export function mapStyle(prefsStyle: string): DbStyle {
 // so larger trees mean fewer trees and the yard isn't packed. Tunable.
 export const TREE_CANOPY_COVERAGE_GOAL = 0.30;       // ~30% shaded at maturity
 export const SHADE_CANOPY_COVERAGE_GOAL = 0.50;      // when "shade" is a priority
+// A tree must suit the SPACE, not just fit geometrically: cap mature height to the yard's linear reach
+// (~√area) × this factor. ~1.1 → a 500 sf yard (~22 ft across) tops out near a small tree; big lots
+// allow full-size canopy. Tunable — raise to allow taller trees per unit area, lower to keep them smaller.
+export const TREE_HEIGHT_PER_SQRT_AREA = 1.1;
 
 // ── Space budget ─────────────────────────────────────────────────────────────────
 // Plants compete for a shared, shrinking pool of planting area, consumed top-down
@@ -120,6 +124,22 @@ function toCandidate(row: PlantRow): SpeciesCandidate {
   const matureHeightFt = Number(row.height_in) / 12;
   return { ...row, matureWidthFt, matureHeightFt, sizeLabel: `${Math.round(matureHeightFt)} ft H · ${Math.round(matureWidthFt)} ft W` };
 }
+// Collapse duplicate species (the DB sometimes holds two rows for the same plant — e.g. one with a
+// photo, one without), keyed by common (else botanical) name. Keeps ranking order by holding each
+// species at its FIRST position, but upgrades to a later duplicate that carries an image so the row
+// shows a real photo instead of the placeholder. Without this the same plant appears twice in a layer.
+function dedupeByName<T extends { common_name?: string; botanical_name?: string; image_url?: string | null }>(cands: T[]): T[] {
+  const at = new Map<string, number>();
+  const out: T[] = [];
+  for (const c of cands) {
+    const key = (c.common_name || c.botanical_name || '').trim().toLowerCase();
+    if (!key) { out.push(c); continue; }
+    const idx = at.get(key);
+    if (idx === undefined) { at.set(key, out.length); out.push(c); }
+    else if (!out[idx].image_url && c.image_url) out[idx] = c; // prefer the variant that has a photo
+  }
+  return out;
+}
 function zoneOk(row: PlantRow, zone?: number): boolean {
   return zone == null || (Number(row.min_zone) <= zone && zone <= Number(row.max_zone));
 }
@@ -130,6 +150,21 @@ function sizeOk(layer: Layer, row: PlantRow): boolean {
   // which matters now that ornamental grasses (some ankle-high) are in the shrub pool.
   if (layer === 'shrub') return h >= 13 && h < LARGE_SHRUB_MIN_IN;
   return true;
+}
+
+// Tree size class, read from the curated `use` token (backfilled by backfill_tree_use_class.sql), with a
+// height fallback for any row that predates the backfill. x-small = accent/patio scale (no meaningful
+// shade — behaves like a focal); small/medium/large are progressively bigger canopies. Cutoffs (in inches)
+// mirror the backfill exactly so the derived fallback and the stored token never disagree.
+export type TreeSizeClass = 'x-small' | 'small' | 'medium' | 'large';
+export function treeSizeClass(row: { use?: string; height_in?: number }): TreeSizeClass {
+  const u = (row.use || '').toLowerCase();
+  if (u.includes('x-small tree')) return 'x-small'; // check before 'small tree' (it's a substring)
+  if (u.includes('small tree'))   return 'small';
+  if (u.includes('medium tree'))  return 'medium';
+  if (u.includes('large tree'))   return 'large';
+  const h = Number(row.height_in);
+  return h < 180 ? 'x-small' : h < 300 ? 'small' : h < 540 ? 'medium' : 'large';
 }
 
 export interface TreeSelection {
@@ -268,6 +303,43 @@ function buildPlantableCtx(
     return true; // open ground cover
   };
   return { isPlantable, plantedBeds, exFeatures, exBeds, paths, distToPath };
+}
+
+// Plantable-ground stats derived from the SAME `isPlantable` rule placePlan uses, so the editor and the
+// "plan is ready" preview measure the yard identically (this was a source of the two showing different
+// plans — they computed plantable area and sun-region shares different ways). Samples a grid over the
+// boundary bbox: `plantableFt` = plantable cells × cell area; `sunShares` = sun-category fractions across
+// the PLANTABLE cells only (null when no sun map). Deterministic.
+export interface PlantableStats { plantableFt: number; sunShares: Record<SunCat, number> | null; }
+export function plantableStats(opts: {
+  boundary: [number, number][];                 // lng/lat polygon
+  existing: ConfirmedFeature[];
+  plan?: { zones?: any[]; beds?: any[]; paths?: any[] };
+  sunAt?: (x: number, y: number) => SunCat;     // feet → sun category (omit → sunShares null)
+}): PlantableStats {
+  const cs = opts.boundary.length >= 3 ? buildCS(opts.boundary) : null;
+  if (!cs) return { plantableFt: 0, sunShares: null };
+  const boundaryFt = opts.boundary.map(v => cs.toXY(v[0], v[1])) as [number, number][];
+  const houses: [number, number][][] = [];
+  for (const f of opts.existing) {
+    if (!f.keep || (f.vertices?.length ?? 0) < 3) continue;
+    if (f.type === 'house' || f.type === 'hardscape' || f.type === 'structure')
+      houses.push(f.vertices.map(v => cs.toXY(v[0], v[1])) as [number, number][]);
+  }
+  const { isPlantable } = buildPlantableCtx(boundaryFt, houses, opts.plan || {});
+  const xs = boundaryFt.map(p => p[0]), ys = boundaryFt.map(p => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const step = Math.max(1, Math.max(maxX - minX, maxY - minY) / 80);
+  const cell = step * step;
+  const cnt: Record<SunCat, number> = { full: 0, part: 0, shade: 0 };
+  let plantableFt = 0, tot = 0;
+  for (let x = minX; x <= maxX; x += step) for (let y = minY; y <= maxY; y += step) {
+    if (!isPlantable(x, y)) continue;
+    plantableFt += cell; tot++;
+    if (opts.sunAt) cnt[opts.sunAt(x, y)]++;
+  }
+  const sunShares = opts.sunAt && tot ? { full: cnt.full / tot, part: cnt.part / tot, shade: cnt.shade / tot } : null;
+  return { plantableFt, sunShares };
 }
 
 // ── Plant capacity (pocket measuring) ───────────────────────────────────────────────
@@ -447,6 +519,7 @@ export async function selectTrees(opts: {
   zone?: number;                    // USDA hardiness zone number (e.g. 7)
   coverageGoal?: number;            // canopy coverage target (default 30%, 50% for shade)
   capacity?: PlantCapacity;         // open-pocket radii (from plantCapacity) — drops trees too big for any pocket
+  yardType?: string;                // 'front' | 'back' — front yards exclude the large class (curb scale)
 }): Promise<TreeSelection> {
   const dbStyle = mapStyle(opts.prefsStyle);
 
@@ -509,15 +582,38 @@ export async function selectTrees(opts: {
     const capFit = candidates.filter(c => pocketFits(opts.capacity!.any, c.matureWidthFt / 2));
     if (capFit.length) candidates = capFit;
   }
+  candidates = dedupeByName(candidates); // one row per species (no photo/no-photo twins)
 
-  // Tree count derives from a canopy-coverage goal, using the typical mature canopy of the
-  // viable species — so big trees mean fewer trees, and the yard keeps open space.
-  const avgCanopy = candidates.length
-    ? candidates.reduce((s, c) => s + canopyFootprintFt(c.matureWidthFt), 0) / candidates.length
-    : canopyFootprintFt(25);
+  // ── Scale to the yard ─────────────────────────────────────────────────────────
+  // A tree must suit the SPACE, not just fit geometrically. Cap mature height to the yard's linear reach
+  // (~√area): a 500 sf yard (~22 ft across) tops out around a small tree; big lots allow full canopy.
+  // Front yards additionally exclude the large class (curb scale + overhead lines). If the cap would empty
+  // the list (a yard too small for anything in-scope), fall back to the three smallest so the picker isn't
+  // blank — the shade-coverage math below then recommends 0, leaving them as optional accent adds.
+  const sizeCeilingFt = TREE_HEIGHT_PER_SQRT_AREA * Math.sqrt(Math.max(1, projectAreaFt));
+  const suitsYard = (c: TreeCandidate) =>
+    c.matureHeightFt <= sizeCeilingFt && (opts.yardType !== 'front' || treeSizeClass(c) !== 'large');
+  const capped = candidates.filter(suitsYard);
+  candidates = capped.length
+    ? capped
+    : [...candidates].sort((a, b) => a.matureHeightFt - b.matureHeightFt).slice(0, 3);
+  // Order accents (x-small) LAST so the auto-selection's "first N" slice grabs real canopy trees, leaving
+  // accents as optional adds/swaps beneath them (stable otherwise).
+  candidates = [...candidates].sort((a, b) =>
+    (treeSizeClass(a) === 'x-small' ? 1 : 0) - (treeSizeClass(b) === 'x-small' ? 1 : 0));
+
+  // Tree count derives from a canopy-coverage goal, using the typical mature canopy of the viable
+  // species — so big trees mean fewer trees, and the yard keeps open space. SHADE is provided by canopy
+  // trees, not accents: size the goal (and the recommended count) from the shade-capable candidates only,
+  // so a 6 ft ornamental never counts as shade or inflates the count. A yard that fits only accents gets
+  // targetToPlant 0 (none recommended) with accents still available to add.
+  const shadeCands = candidates.filter(c => treeSizeClass(c) !== 'x-small');
+  const avgCanopy = shadeCands.length
+    ? shadeCands.reduce((s, c) => s + canopyFootprintFt(c.matureWidthFt), 0) / shadeCands.length
+    : 0;
   const targetCanopyFt = (opts.coverageGoal ?? TREE_CANOPY_COVERAGE_GOAL) * projectAreaFt;
   const targetTotal = avgCanopy > 0 ? Math.round(targetCanopyFt / avgCanopy) : 0;
-  const targetToPlant = Math.max(0, Math.round((targetCanopyFt - existingCanopyFt) / avgCanopy));
+  const targetToPlant = avgCanopy > 0 ? Math.max(0, Math.round((targetCanopyFt - existingCanopyFt) / avgCanopy)) : 0;
 
   return {
     dbStyle, projectAreaFt, zone: opts.zone, targetTotal, existingCounted, targetToPlant, candidates,
@@ -545,7 +641,11 @@ export async function selectLayer(layer: Layer, opts: { prefsStyle: string; zone
   const styled = usable.filter(r => styleMatches(r.style, dbStyle)); // style is a HARD filter
   const zoned = styled.filter(r => zoneOk(r, opts.zone));
   // Fall back past the zone filter if it empties the list (better than nothing).
-  const candidates = (zoned.length ? zoned : styled).map(toCandidate);
+  let candidates = dedupeByName((zoned.length ? zoned : styled).map(toCandidate));
+  // The large-shrub tier is the foundation/ANCHOR layer — presence matters, so lead with the BROADEST
+  // species. A tall-but-skinny grass (e.g. 6 ft × 2 ft feather reed grass) makes a poor solo anchor; put
+  // the wide woody shrubs first so they're picked before grasses. Other layers keep DB/relevance order.
+  if (layer === 'large_shrub') candidates = [...candidates].sort((a, b) => b.matureWidthFt - a.matureWidthFt);
   return { layer, dbStyle, zone: opts.zone, candidates, styleMatched: styled.length, zoneMatched: zoned.length };
 }
 

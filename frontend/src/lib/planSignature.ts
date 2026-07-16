@@ -1,7 +1,12 @@
-// The design-input signature: identifies WHICH inputs produced the current auto-generated plan.
-// The studio (/diy/auto-layout) regenerates when it changes and preserves edits when it matches;
-// the draft flow writes a matching signature so handing off to the studio keeps the draft intact.
-// Bump `v` whenever the generator's rules change so existing plans regenerate once.
+import { STREET_VIEW_ENABLED } from '../services/streetViewService';
+
+// The design-input signature: a pure input-change detector. It answers exactly one question —
+// "did the design INPUTS change since this plan was generated?" — and nothing else. It NEVER
+// carries a generator version: that is now pinned per-design via generator_version /
+// diyPlanGeneratorVersion (Phase 2), so an engine version bump must NOT change this hash or it
+// would falsely report an input change. The draft flow writes a matching signature so handing off
+// to the studio keeps the draft intact; a mismatch on mount surfaces the "your changes aren't in
+// the plan yet" prompt (RegenPrompt) — it never silently regenerates.
 // Content hash of the CURRENT plan + placed plants — unlike inputSignature(), this changes when
 // the user edits the plan (drags a feature, adds a walkway, swaps plants), so anything derived
 // from the plan's actual content (e.g. the AI rendering cache) stays honest after edits.
@@ -33,8 +38,10 @@ export function inputSignature(): string {
     // Placement-relevant Street View facts ONLY — the side gate + driveway sides feed layout rules.
     // House colours/roof are render-only and deliberately excluded: they must not change the plan
     // signature (which gates regeneration) or a first Street View fetch would clobber user edits.
+    // Street View is parked (see STREET_VIEW_ENABLED): don't let a stale diyStreetView entry feed the
+    // signature, so it can never trigger a regeneration while disabled.
     let street: { gate: [boolean, string | null]; drive: [boolean, string | null]; porch: boolean } | null = null;
-    try {
+    if (STREET_VIEW_ENABLED) try {
       const sv = JSON.parse(localStorage.getItem('diyStreetView') || 'null');
       const ins = sv?.result?.insights;
       if (ins) street = {
@@ -44,7 +51,7 @@ export function inputSignature(): string {
       };
     } catch { street = null; }
     return JSON.stringify({
-      v: 'g20', // g20: only shade-tolerant plants under existing tree canopies
+      // No `v`/generator-version tag here — this hash tracks design INPUTS only (see header).
       boundary: saved.boundary ?? [],
       existing: (saved.confirmedFeatures ?? []).map((f: any) => [f.type, f.keep, f.vertices?.length]),
       features: prefs.space_usage ?? [],

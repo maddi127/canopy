@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GoogleMap, useJsApiLoader, Polygon } from '@react-google-maps/api';
 import type { ConfirmedFeature } from '../pages/DiyFeatureConfirmPage';
 import { buildFrontZones } from '../services/plantSelectionService';
+import { IT } from '../lib/theme';
 
 // Read-only render of the placement plan on the same satellite map — same coordinate
 // system and projection-based affine as DiyPlacementPage, minus all editing.
 
 const GOOGLE_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY || '';
 const PAD = 24;
-const IT = "'Inter Tight', sans-serif";
 
 const FEATURE_COLOR: Record<string, string> = {
   house: '#C4935A', tree: '#4A8C6A', hardscape: '#B5A48B', structure: '#9A8B78',

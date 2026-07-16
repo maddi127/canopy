@@ -7,9 +7,8 @@ import Logo from '../../components/Logo';
 import { detectSiteFeatures } from '../../services/geminiService';
 import { detectionBox } from '../../services/boundaryProposer';
 import type { ConfirmedFeature } from '../DiyFeatureConfirmPage';
+import { IS, IT } from '../../lib/theme';
 
-const IS = "'Instrument Serif', serif";
-const IT = "'Inter Tight', sans-serif";
 const GOOGLE_MAPS_KEY = (import.meta as any).env?.VITE_GOOGLE_MAPS_KEY ?? '';
 
 const FEATURES = [
@@ -118,7 +117,7 @@ export default function DraftScanPage() {
             <div style={{ fontFamily: IT, fontSize: '0.72rem', fontWeight: 700, color: '#9A9A8E', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>Which yard?</div>
             <div className="flex gap-2">
               <button style={chip(yard === 'front')} onClick={() => setYard('front')}>Front yard</button>
-              <button style={chip(yard === 'back')} onClick={() => setYard('back')}>Back yard</button>
+              <button style={chip(yard === 'back')} onClick={() => setYard('back')}>Backyard</button>
             </div>
           </div>
 

@@ -9,10 +9,9 @@ import {
   paintLawnMowerArcs, paintPathEdges, paintPathBody, darkenHex, type PlantMarker, type Layer,
 } from '../lib/planPainter';
 
-const BG = '#efe9db';
+import { IS, IT, PAGE_BG } from '../lib/theme';
+
 const DARK = '#2A2A26';
-const IS = "'Instrument Serif', serif";
-const IT = "'Inter Tight', sans-serif";
 
 // Side-by-side hero panels (aerial + street view). Matched height keeps the two columns aligned.
 const REVIEW_HERO_H = 320;
@@ -417,7 +416,7 @@ export default function DiyReviewPage() {
   const card: React.CSSProperties = { background: 'white', borderRadius: 18, padding: '22px 24px', boxShadow: '0 2px 14px rgba(42,42,38,0.06)', marginBottom: 18 };
 
   return (
-    <div style={{ minHeight: '100vh', background: BG, fontFamily: IT }}>
+    <div style={{ minHeight: '100vh', background: PAGE_BG, fontFamily: IT }}>
       <style>{`
         @media print {
           .no-print { display: none !important; }

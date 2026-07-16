@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { GoogleMap, useJsApiLoader, Polygon as GPolygon, Polyline as GPolyline, Marker as GMarker } from '@react-google-maps/api';
 import * as turf from '@turf/turf';
 import Logo from '../components/Logo';
+import BackButton from '../components/BackButton';
+import { IS, IT, PAGE_BG } from '../lib/theme';
 
 const GOOGLE_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY || '';
 
@@ -16,9 +18,6 @@ function dashedLine(color: string, weight = 2): google.maps.PolylineOptions {
     icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: weight, strokeColor: color }, offset: '0', repeat: '10px' }],
   };
 }
-
-const IT = "'Inter Tight', sans-serif";
-const IS = "'Instrument Serif', serif";
 
 type Phase    = 'review' | 'add';
 type AddMode  = 'tree' | 'hardscape' | 'structure' | null;
@@ -552,7 +551,7 @@ export default function DiyFeatureConfirmPage() {
 
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
-    <div className="h-screen flex flex-col" style={{ backgroundColor: '#efe9db', overflow: 'hidden' }}>
+    <div className="h-screen flex flex-col" style={{ backgroundColor: PAGE_BG, overflow: 'hidden' }}>
       <div className="flex items-center justify-between px-10 py-4 flex-shrink-0">
         <Logo />
       </div>
@@ -704,11 +703,8 @@ export default function DiyFeatureConfirmPage() {
         </div>
       </div>
 
-      <button onClick={() => navigate(-1)}
-        className="fixed bottom-6 left-10 hover:opacity-70 transition-all"
-        style={{ fontFamily: IT, fontSize: '0.85rem', color: '#7A7A73', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-        ← back
-      </button>
+      <BackButton onClick={() => navigate(-1)}
+        className="fixed bottom-6 left-10" />
 
       {phase === 'add' && addMode === null && (
         <button onClick={handleDone}

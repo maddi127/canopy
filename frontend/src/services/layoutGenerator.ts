@@ -69,6 +69,7 @@ function polyGap(A: Ring, B: Ring): number {
   for (const p of B) m = Math.min(m, distToPolys(p[0], p[1], [A]));
   return m;
 }
+const LAWN_MIN_FT = 3;  // mowability floor — a lawn narrower than this in any dimension is dropped, not shrunk
 const GAP_MIN_FT = 2;   // matches the placement page's tight-gap warning — no slivers < 2 ft
 const FLUSH_EPS = 0.3;  // ≤ this reads as "touching" (flush); a gap must be ≤FLUSH_EPS or ≥GAP_MIN
 const SNAP_RANGE = 14;  // only snap to a target within this distance (else leave freestanding)
@@ -261,11 +262,11 @@ export function generateLayout(opts: { boundary: Ring; existing: ConfirmedFeatur
     // (Walkways are not auto-placed — they'll be offered in the future "details" step.)
   }
 
-  // Lawn — centred LEFT–RIGHT, then anchored FRONT–BACK one of three ways (chosen by seed,
-  // leaning centred): against the house, against the front/property line, or floating with
-  // borders all around.
+  // Lawn — placed after features, into the space they leave. Proportioned to the yard's aspect ratio
+  // (a rectangle, not a forced square) so it fills a narrow yard instead of shrinking to a tiny patch.
   if (lawnTarget > 0) {
-    let area = usableArea * lawnTarget, w = Math.max(8, Math.sqrt(area)), h = w;
+    const area = usableArea * lawnTarget;
+    const bw = maxX - minX, bh = maxY - minY;
     // Axes: frontDir = house→yard (front/back); crossDir = perpendicular (left/right).
     let frontDir: [number, number];
     if (houseRings.length) { const dx = yardC[0] - houseCenter[0], dy = yardC[1] - houseCenter[1], len = Math.hypot(dx, dy) || 1; frontDir = [dx / len, dy / len]; }
@@ -282,23 +283,31 @@ export function generateLayout(opts: { boundary: Ring; existing: ConfirmedFeatur
       return s;
     };
     const lawnId = `gen_lawn_${n++}`, lawnShape = shapeFor('lawn', dbStyle);
-    // The lawn may OVERLAP movable features (we don't bake the carve — every view clips/layers
-    // features over the lawn, so dragging a feature OUT refills it). But it must sit BESIDE fixed
-    // things — house, existing hardscape, WALKWAYS, trees — flush-or-≥2 ft, never straddling them
-    // (a walkway should edge the lawn, not split it into slivers).
+    // The lawn sits BESIDE everything (house, hardscape, trees, placed features) — flush-or-≥2 ft, never
+    // straddling. If it can't fit beside everything, the retry loop shrinks it until it does.
     const lawnFits = (ring: Ring): boolean => {
       if (!insideBoundary(ring)) return false;
       const rp = turf.polygon([closeRing(ring)]);
       for (let i = 0; i < obstaclePolys.length; i++) { if (turf.booleanIntersects(rp, obstaclePolys[i])) return false; if (!gapOk(polyGap(ring, obstacles[i]))) return false; }
-      for (const p of placed) { if (turf.booleanIntersects(rp, p.poly)) continue; if (!gapOk(polyGap(ring, p.ring))) return false; }
+      for (const p of placed) { if (turf.booleanIntersects(rp, p.poly)) return false; if (!gapOk(polyGap(ring, p.ring))) return false; }
       return true;
     };
-    let spot: { cx: number; cy: number; w: number; h: number } | null = null;
-    for (let tries = 0; tries < 7 && !spot; tries++) {
-      const ringAt = makeRingAt(lawnShape, w, h, lawnId);
-      let best: { cx: number; cy: number } | null = null, bestS = -Infinity;
-      for (let i = 0; i <= GRID; i++) for (let j = 0; j <= GRID; j++) { const cx = minX + i * sx, cy = minY + j * sy; if (lawnFits(ringAt(cx, cy))) { const s = lawnScore(cx, cy); if (s > bestS) { bestS = s; best = { cx, cy }; } } }
-      if (best) spot = { ...best, w, h }; else { w *= 0.84; h *= 0.84; }
+    // Find the LARGEST lawn that fits beside everything by sweeping several proportions (tall → square →
+    // wide). The free space left beside features is rarely square, so a single fixed proportion under-
+    // fills a narrow yard; for each proportion we shrink until it fits, then keep the biggest-area result.
+    const aspects = [bh > 0 ? bw / bh : 1, 0.5, 0.75, 1, 1.4, 2].map(a => Math.max(0.35, Math.min(2.8, a)));
+    let spot: { cx: number; cy: number; w: number; h: number } | null = null, spotArea = 0;
+    for (const aspect of aspects) {
+      const w0 = Math.max(8, Math.sqrt(area * aspect));
+      let w = w0, h = Math.max(8, area / w0);
+      for (let tries = 0; tries < 7; tries++) {
+        if (w < LAWN_MIN_FT || h < LAWN_MIN_FT) break; // mowability floor — drop rather than a sliver
+        const ringAt = makeRingAt(lawnShape, w, h, lawnId);
+        let best: { cx: number; cy: number } | null = null, bestS = -Infinity;
+        for (let i = 0; i <= GRID; i++) for (let j = 0; j <= GRID; j++) { const cx = minX + i * sx, cy = minY + j * sy; if (lawnFits(ringAt(cx, cy))) { const s = lawnScore(cx, cy); if (s > bestS) { bestS = s; best = { cx, cy }; } } }
+        if (best) { if (w * h > spotArea) { spot = { ...best, w, h }; spotArea = w * h; } break; } // largest that fits, at this proportion
+        w *= 0.84; h *= 0.84;
+      }
     }
     if (spot) zones.push({ id: lawnId, key: 'lawn', label: 'Lawn', color: '#8DAA6A', shape: lawnShape, xFt: spot.cx - spot.w / 2, yFt: spot.cy - spot.h / 2, wFt: Math.round(spot.w), hFt: Math.round(spot.h) });
   }

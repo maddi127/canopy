@@ -210,7 +210,7 @@ function normStyle(s: string): Style {
 // STYLE GEOMETRY. modern → orthogonal (snap a dogleg corner to a 90° L). traditional/natural → one
 // gentle midpoint bow on straight runs (perpendicular offset min(3ft, 12% length), toward the yard
 // centroid). desert → straight. All deterministic.
-function applyStyle(pts: Pt[], style: Style, yardC: Pt): { pts: Pt[]; winding: boolean } {
+function applyStyle(pts: Pt[], style: Style, yardC: Pt, obstacles: Box[] = []): { pts: Pt[]; winding: boolean } {
   if ((style === 'traditional' || style === 'natural') && pts.length === 2) {
     const a = pts[0], b = pts[1], len = dist(a, b);
     if (len > 4) {
@@ -219,8 +219,17 @@ function applyStyle(pts: Pt[], style: Style, yardC: Pt): { pts: Pt[]; winding: b
       const off = Math.min(3, 0.12 * len);
       const plus: Pt = [mid[0] + px * off, mid[1] + py * off];
       const minus: Pt = [mid[0] - px * off, mid[1] - py * off];
-      const bow = dist(plus, yardC) <= dist(minus, yardC) ? plus : minus;   // bow toward the yard centroid
-      return { pts: [a, bow, b], winding: true };
+      // Prefer bowing toward the yard centroid (the classic look) — but NEVER arc the path into a zone.
+      // The lawn sits at the centroid, so the naive centroid-bow would curve the walkway straight into
+      // it; bow the OTHER way if that side is clear, else keep it straight (edge the lawn, don't bisect).
+      // Zones already containing an endpoint are ignored (a path legitimately meeting a zone's edge).
+      const relevant = obstacles.filter(box => !ptInBox(a, box) && !ptInBox(b, box));
+      const bowsInto = (m: Pt) => relevant.some(box => ptInBox(m, box) || segCrossesBox(a, m, box) || segCrossesBox(m, b, box));
+      const toward = dist(plus, yardC) <= dist(minus, yardC) ? plus : minus;
+      const away = toward === plus ? minus : plus;
+      const bow = !bowsInto(toward) ? toward : (!bowsInto(away) ? away : null);
+      if (bow) return { pts: [a, bow, b], winding: true };
+      return { pts, winding: false };   // both offsets would enter a zone → keep it straight
     }
   }
   if (style === 'modern' && pts.length === 3) {
@@ -294,7 +303,7 @@ export function planCirculation(input: CirculationInput): PlanPath[] {
     const zoneBoxes = (zones || []).filter(z => z !== spec.ignoreZone).map(z => zoneBox(z, 2));
     const hb = spec.houseBoxOverride !== undefined ? spec.houseBoxOverride : houseBox;
     const routed = routeEdge(spec.a, spec.b, hb, zoneBoxes);
-    const styled = applyStyle(routed, style, yardC);
+    const styled = applyStyle(routed, style, yardC, hb ? [hb, ...zoneBoxes] : zoneBoxes);
     if (!spec.skipGuard && overlapsExisting(styled.pts)) return false;   // duplicates an existing private walkway
     out.push({ id: `circ_${spec.key}_${idn++}`, label: spec.label, startId: 'auto', endId: 'auto', pts: styled.pts, style: styled.winding ? 'winding' : 'straight', material: spec.materialOverride ?? material, widthFt: spec.widthOverride ?? (spec.primary ? 4 : 3), kind: 'walkway', reason: spec.reason });
     network.push(styled.pts);

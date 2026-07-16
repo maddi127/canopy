@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
+import BackButton from '../components/BackButton';
 import { generateFinalPlanImage } from '../services/geminiService';
 import { PLANTS } from '../features/planting/plantDatabase';
 import type { ZonePalette } from '../features/planting/paletteCurator';
 
-const IT = "'Inter Tight', sans-serif";
-const IS = "'Instrument Serif', serif";
+import { IS, IT, PAGE_BG } from '../lib/theme';
 
 const LOADING_MESSAGES = [
   'Painting your landscape…',
@@ -113,7 +113,7 @@ export default function DiyFinalRenderPage() {
   const handleContinue = () => navigate('/diy/plan');
 
   return (
-    <div className="h-screen flex flex-col" style={{ backgroundColor: '#efe9db', overflow: 'hidden' }}>
+    <div className="h-screen flex flex-col" style={{ backgroundColor: PAGE_BG, overflow: 'hidden' }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
       <div className="flex items-center justify-between px-10 py-4 flex-shrink-0">
@@ -163,11 +163,8 @@ export default function DiyFinalRenderPage() {
         </div>
       </div>
 
-      <button onClick={() => navigate(-1)}
-        className="fixed bottom-6 left-10 hover:opacity-70 transition-all"
-        style={{ fontFamily: IT, fontSize: '0.85rem', color: '#7A7A73', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-        ← back
-      </button>
+      <BackButton onClick={() => navigate(-1)}
+        className="fixed bottom-6 left-10" />
 
       {image && (
         <button onClick={handleContinue}

@@ -6,9 +6,8 @@ import Logo from '../../components/Logo';
 import PlanSnapshot from '../../components/PlanSnapshot';
 import BuildPlan from '../../components/BuildPlan';
 import type { PlantInstance } from '../../services/draftPlants';
+import { IS, IT, PAGE_BG } from '../../lib/theme';
 
-const IS = "'Instrument Serif', serif";
-const IT = "'Inter Tight', sans-serif";
 const DARK = '#2A2A26';
 
 export default function DraftOutputPage() {
@@ -21,7 +20,7 @@ export default function DraftOutputPage() {
   const card: React.CSSProperties = { background: 'white', borderRadius: 18, padding: '22px 24px', boxShadow: '0 2px 14px rgba(42,42,38,0.06)', marginBottom: 18 };
 
   return (
-    <div style={{ minHeight: '100vh', background: '#efe9db', fontFamily: IT }}>
+    <div style={{ minHeight: '100vh', background: PAGE_BG, fontFamily: IT }}>
       <style>{`
         @media print {
           .no-print { display: none !important; }

@@ -7,9 +7,7 @@ import Logo from '../../components/Logo';
 import PlanSnapshot from '../../components/PlanSnapshot';
 import { generateDraftPlan, type DraftPlan } from '../../services/draftPlan';
 import { buildDraftPlants, type DraftPlantResult } from '../../services/draftPlants';
-
-const IS = "'Instrument Serif', serif";
-const IT = "'Inter Tight', sans-serif";
+import { IS, IT, PAGE_BG } from '../../lib/theme';
 
 const FEATURES = [
   { id: 'seating', label: 'Seating' }, { id: 'dining', label: 'Dining' },
@@ -86,7 +84,7 @@ export default function DraftPlanPage() {
   const totalPlants = plants.instances.length;
 
   return (
-    <div className="h-screen flex" style={{ backgroundColor: '#F4F0E6', overflow: 'hidden' }}>
+    <div className="h-screen flex" style={{ backgroundColor: PAGE_BG, overflow: 'hidden' }}>
       {/* Sidebar — the simplified edit panel */}
       <div className="flex flex-col" style={{ width: 'min(400px, 36vw)', flexShrink: 0, borderRight: '1px solid rgba(42,42,38,0.08)' }}>
         <div className="px-7 pt-7 pb-3"><Logo /></div>

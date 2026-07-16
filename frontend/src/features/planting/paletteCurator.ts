@@ -167,11 +167,18 @@ export function deterministicPalette(
 
 // ── LLM curation ──────────────────────────────────────────────────────────
 
-const GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
+// Dev-only key: the import.meta.env.DEV gate lets Vite strip the key and the
+// direct-to-Google branch out of production bundles entirely.
+const GEMINI_KEY = import.meta.env.DEV ? (import.meta.env.VITE_GEMINI_API_KEY || '') : '';
 // Direct to Google in dev (key present), else via the server-side proxy.
-const TEXT_URL = GEMINI_KEY
+const TEXT_URL = import.meta.env.DEV && GEMINI_KEY
   ? `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`
   : `/.netlify/functions/gemini?model=gemini-2.0-flash`;
+// The key header only exists on the dev direct path — never sent to the proxy.
+const GEMINI_HEADERS: Record<string, string> =
+  import.meta.env.DEV && GEMINI_KEY
+    ? { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY }
+    : { 'Content-Type': 'application/json' };
 // Gemini is reachable in prod (via proxy) or in dev when a key is set;
 // otherwise fall back to the deterministic palette below.
 const GEMINI_AVAILABLE = Boolean(GEMINI_KEY) || import.meta.env.PROD;
@@ -249,7 +256,7 @@ Schema:
   try {
     const res = await fetch(TEXT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_KEY },
+      headers: GEMINI_HEADERS,
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { temperature: 0.35 },

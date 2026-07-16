@@ -4,13 +4,13 @@ import MapGL, { Source, Layer, NavigationControl, type MapRef } from 'react-map-
 import * as turf from '@turf/turf';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import Logo from '../components/Logo';
+import BackButton from '../components/BackButton';
 import { PLANTS, type Plant } from '../features/planting/plantDatabase';
 import { curatePalettes, STYLE_CAPS, type ZonePalette, type ZoneInput } from '../features/planting/paletteCurator';
 import { placePlantingBed, placeTreeZone, instancesToGeoJSON } from '../features/planting/geometricPlacement';
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN || '';
-const IT = "'Inter Tight', sans-serif";
-const IS = "'Instrument Serif', serif";
+import { IS, IT, PAGE_BG } from '../lib/theme';
 
 // ── Plant type grouping ────────────────────────────────────────────────────────
 
@@ -324,7 +324,7 @@ export default function DiyRefinePage() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="h-screen flex flex-col" style={{ backgroundColor: '#efe9db', overflow: 'hidden' }}>
+    <div className="h-screen flex flex-col" style={{ backgroundColor: PAGE_BG, overflow: 'hidden' }}>
 
       {/* Header */}
       <div className="flex items-center justify-between px-10 py-4 flex-shrink-0">
@@ -601,11 +601,8 @@ export default function DiyRefinePage() {
       </div>
 
       {/* Bottom nav */}
-      <button onClick={() => navigate(-1)}
-        className="fixed bottom-6 left-10 hover:opacity-70 transition-all"
-        style={{ fontFamily: IT, fontSize: '0.85rem', color: '#7A7A73', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-        ← back
-      </button>
+      <BackButton onClick={() => navigate(-1)}
+        className="fixed bottom-6 left-10" />
       <button onClick={handleContinue}
         className="fixed bottom-6 right-10 flex items-center gap-2 px-7 py-3.5 rounded-full transition-all hover:opacity-90"
         style={{ backgroundColor: '#2F6B4F', color: 'white', fontFamily: IT, fontSize: '0.88rem', fontWeight: 500, border: 'none', cursor: 'pointer' }}>

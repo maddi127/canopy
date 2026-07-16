@@ -1,4 +1,4 @@
-const IT = "'Inter Tight', sans-serif";
+import { IT, GREEN } from '../lib/theme';
 
 interface AppStepperProps {
   step: number;
@@ -19,7 +19,7 @@ export default function AppStepper({ step, total = 3 }: AppStepperProps) {
               width: '28px',
               height: '2px',
               borderRadius: '1px',
-              backgroundColor: i < step ? '#2F5D3A' : '#D4CFC7',
+              backgroundColor: i < step ? GREEN : '#D4CFC7',
             }}
           />
         ))}

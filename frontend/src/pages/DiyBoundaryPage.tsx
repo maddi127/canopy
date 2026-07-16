@@ -3,18 +3,18 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { GoogleMap, useJsApiLoader, Marker, Polygon, Polyline, OverlayView } from '@react-google-maps/api';
 import * as turf from '@turf/turf';
 import Logo from '../components/Logo';
+import BackButton from '../components/BackButton';
 import AddressInput from '../features/onboarding/AddressInput';
 import AppStepper from '../components/AppStepper';
 import IllustrativeSite from '../components/IllustrativeSite';
 import GrowingFlower from '../components/GrowingFlower';
 import { detectSiteFeatures } from '../services/geminiService';
-import { analyzeStreetView } from '../services/streetViewService';
+import { analyzeStreetView, STREET_VIEW_ENABLED } from '../services/streetViewService';
 import { detectSiteZones, type SiteZones } from '../services/siteZones';
 import type { ConfirmedFeature } from './DiyFeatureConfirmPage';
+import { IS, IT, PAGE_BG } from '../lib/theme';
 
 const GOOGLE_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY || '';
-const IT = "'Inter Tight', sans-serif";
-const IS = "'Instrument Serif', serif";
 
 // Feet coordinate system from a boundary ring — IDENTICAL to IllustrativeSite's buildCS, so an
 // affine computed here lines the illustration up exactly with the satellite at the user's zoom.
@@ -163,17 +163,22 @@ const STEP_TITLE: Record<StepId, string> = {
   door:         'Mark main entry',
 };
 
-const STEP_INSTRUCTION: Record<StepId, string> = {
-  boundary:     'Draw your project area',
-  door:         'Mark your main entry',
-  identify:     'Mark existing features in your project area',
-  add_existing: 'Add existing features',
+// Step heading — yard-side aware ("front"/"back" from the selected yard type; omitted if unknown).
+const stepInstruction = (step: StepId, side: string): string => {
+  const s = side === 'front' || side === 'back' ? `${side} ` : '';               // "front "/"back " — for "back door"
+  const yardWord = side === 'back' ? 'backyard' : side === 'front' ? 'front yard' : 'yard'; // "backyard" is one word
+  switch (step) {
+    case 'boundary':     return `Outline your ${yardWord} below`;
+    case 'door':         return `Mark your primary ${s}door on the map`;
+    case 'identify':     return `Confirm the existing features in your ${yardWord}`;
+    case 'add_existing': return 'Add existing features';
+  }
 };
 
 const STEP_SUBTITLE: Record<StepId, string> = {
-  boundary:     'Click to outline your project boundary. Double click or press done to finish',
+  boundary:     "Double-click or hit “Done drawing” to finish",
   door:         "If you have multiple doors to your yard, mark the one you use most",
-  identify:     "Confirm, edit, or remove each feature. We'll design your plan around these",
+  identify:     "We'll design your plan around these",
   add_existing: 'Add anything we missed',
 };
 
@@ -276,7 +281,15 @@ export default function DiyBoundaryPage() {
   const [detecting,  setDetecting]  = useState(false);
   const [drawing,    setDrawing]    = useState(false);
   const [vertices,   setVertices]   = useState<[number, number][]>(() => {
-    try { return JSON.parse(localStorage.getItem('diyBoundary') || 'null')?.ring ?? []; } catch { return []; }
+    try {
+      const ring = JSON.parse(localStorage.getItem('diyBoundary') || 'null')?.ring;
+      if (Array.isArray(ring) && ring.length >= 3) return ring;
+      // Fall back to the authoritative bundle (written by goToPlacement AND when a saved design loads,
+      // which does NOT write the diyBoundary key) — so re-entering never loses the drawn boundary.
+      const fin = JSON.parse(localStorage.getItem('diyBoundaryFinal') || 'null')?.boundary;
+      if (Array.isArray(fin) && fin.length >= 3) return fin;
+    } catch { /* ignore */ }
+    return [];
   });
   const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
   const [mousePos,   setMousePos]   = useState<[number, number] | null>(null);
@@ -347,7 +360,18 @@ export default function DiyBoundaryPage() {
   // then STAYS (replacing the green polygon). Rendered as a custom OverlayView in the map's overlay
   // pane so the map moves/scales it natively (no fixed-pixel recompute lag on pan/zoom). `traceOn`
   // gates it; the live instance lives in pencilOverlayRef.
-  const [traceOn, setTraceOn] = useState(false);
+  const [traceOn, setTraceOn] = useState(() => {
+    // A restored, already-closed boundary shows the hand-drawn trace immediately — so the outline persists
+    // (in the hand-drawn style) across the boundary/door/identify sub-steps and across re-entry, not just
+    // right after it's first closed. Same source order as the vertices restore above.
+    try {
+      const ring = JSON.parse(localStorage.getItem('diyBoundary') || 'null')?.ring;
+      if (Array.isArray(ring) && ring.length >= 3) return true;
+      const fin = JSON.parse(localStorage.getItem('diyBoundaryFinal') || 'null')?.boundary;
+      if (Array.isArray(fin) && fin.length >= 3) return true;
+    } catch { /* ignore */ }
+    return false;
+  });
   const pencilOverlayRef = useRef<google.maps.OverlayView | null>(null);
   // Street View analysis kicked off when the plan reveal begins, so it runs CONCURRENTLY with the
   // reveal animation; we await it (with a hard timeout) just before navigating to /diy/plan-ready.
@@ -367,6 +391,23 @@ export default function DiyBoundaryPage() {
     const s = (location.state as { step?: StepId } | null)?.step;
     return s === 'door' || s === 'identify' ? s : 'boundary';
   });
+
+  // Step-transition beat: on each advance between the boundary sub-steps, briefly take over the map with
+  // a step card so the change is unmistakable — user testing showed the (unchanging) map hid the fact
+  // that the step changed, even with the title change + boundary animation.
+  const [transStep, setTransStep] = useState<StepId | null>(null);
+  const transTimer = useRef<number | null>(null);
+  const prevStepForTransRef = useRef<StepId | null>(null);
+  useEffect(() => {
+    const prev = prevStepForTransRef.current;
+    prevStepForTransRef.current = openStep;
+    if (prev === null || prev === openStep) return;                 // skip initial mount / no-op
+    if (openStep !== 'boundary' && openStep !== 'door' && openStep !== 'identify') return;
+    setTransStep(openStep);
+    if (transTimer.current) window.clearTimeout(transTimer.current);
+    transTimer.current = window.setTimeout(() => setTransStep(null), 750);
+  }, [openStep]);
+  useEffect(() => () => { if (transTimer.current) window.clearTimeout(transTimer.current); }, []);
   // Bumped on Re-draw to remount the map and clear any stale overlays.
   const [mapEpoch, setMapEpoch] = useState(0);
   // The live map instance, set in onLoad — used to manage feature overlays imperatively.
@@ -384,10 +425,14 @@ export default function DiyBoundaryPage() {
   // ── Confirmed features ───────────────────────────────────────────────────────
   const [features, setFeatures] = useState<ConfirmedFeature[]>(() => {
     try {
+      // Prefer the confirmed list if the key EXISTS (even if empty — the user may have removed all),
+      // then the authoritative bundle (covers a loaded design), then the raw detections.
       const saved = localStorage.getItem('diyConfirmedFeatures');
-      if (saved) return JSON.parse(saved);
+      if (saved !== null) { const p = JSON.parse(saved); if (Array.isArray(p)) return p; }
+      const fin = JSON.parse(localStorage.getItem('diyBoundaryFinal') || 'null')?.confirmedFeatures;
+      if (Array.isArray(fin)) return fin;
       const raw = localStorage.getItem('diyDetectedFeatures');
-      if (raw) return JSON.parse(raw);
+      if (raw) { const p = JSON.parse(raw); if (Array.isArray(p)) return p; }
     } catch {}
     return [];
   });
@@ -416,7 +461,6 @@ export default function DiyBoundaryPage() {
 
   // ── Feature review cursor ────────────────────────────────────────────────────
   // "{N} found" pill is a stable count of DETECTED features (not affected by removes).
-  const detectedCount = useMemo(() => features.filter(f => f.source === 'detected').length, [features]);
 
   // The card shows ONE feature at a time (the active one). No on-map drag editing anymore.
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -433,9 +477,10 @@ export default function DiyBoundaryPage() {
   const [reviewedIds, setReviewedIds] = useState<string[]>([]);
   const reviewedSet = useMemo(() => new Set(reviewedIds), [reviewedIds]);
   const allReviewed = useMemo(() => {
-    const detected = features.filter(f => f.source === 'detected');
-    return detected.length === 0 || detected.every(f => reviewedSet.has(f.id) || f.keep === false);
-  }, [features, reviewedSet]);
+    // EVERY live feature — auto-detected AND user-added — must be reviewed, so added features are
+    // surfaced for reconfirm/delete too (removed ones drop out of liveFeatures and don't block).
+    return liveFeatures.length === 0 || liveFeatures.every(f => reviewedSet.has(f.id));
+  }, [liveFeatures, reviewedSet]);
 
   // Confirm the active feature and advance to the next live one.
   const confirmFeature = useCallback((id: string) => {
@@ -453,8 +498,25 @@ export default function DiyBoundaryPage() {
     setActiveId(last);
   }, [reviewedIds]);
 
+  // A feature the user ADDS this session is auto-marked reviewed (they just defined it — don't re-prompt).
+  // Features present at MOUNT are seeded here WITHOUT being marked, so a re-entry (reviewedIds resets to
+  // []) surfaces every added feature again for reconfirm/delete. Seed is the initial `features` set.
+  const seenAddedRef = useRef<Set<string>>(new Set(features.filter(f => f.source === 'added').map(f => f.id)));
+  useEffect(() => {
+    const fresh = features.filter(f => f.source === 'added' && !seenAddedRef.current.has(f.id)).map(f => f.id);
+    if (!fresh.length) return;
+    fresh.forEach(id => seenAddedRef.current.add(id));
+    setReviewedIds(prev => [...prev, ...fresh.filter(id => !prev.includes(id))]);
+  }, [features]);
+
   const [doorPoint, setDoorPoint] = useState<[number, number] | null>(() => {
-    try { return JSON.parse(localStorage.getItem('diyDoorPoint') || 'null'); } catch { return null; }
+    try {
+      const dp = JSON.parse(localStorage.getItem('diyDoorPoint') || 'null');
+      if (Array.isArray(dp)) return dp as [number, number];
+      const fin = JSON.parse(localStorage.getItem('diyBoundaryFinal') || 'null')?.doorPoint;
+      if (Array.isArray(fin)) return fin as [number, number];
+    } catch { /* ignore */ }
+    return null;
   });
   useEffect(() => {
     if (doorPoint) localStorage.setItem('diyDoorPoint', JSON.stringify(doorPoint));
@@ -483,7 +545,8 @@ export default function DiyBoundaryPage() {
     if (changed) setFeatures(next);
   }, [doorPoint, vertices, features]);
 
-  // Continue once the area is drawn — reviewing existing features is optional and never blocks.
+  // Boundary step advances once the area is drawn. (The identify step additionally requires every
+  // detected feature to be reviewed before Continue — see `ready` in the bottom nav.)
   const canContinue = boundaryDone;
 
   // 'remove' sets keep:false (drops out of the list); 'not_real' deletes it entirely.
@@ -650,7 +713,9 @@ export default function DiyBoundaryPage() {
       ? [...ePolyVerts, mousePos] : null,
   [isPolyAddMode, ePolyStep, ePolyVerts, mousePos]);
 
-  const showConfirmedFeatures = features.length > 0 && !drawing;
+  // Existing-feature outlines only show on the identify step (where you review them) — not while
+  // drawing the boundary or marking the door.
+  const showConfirmedFeatures = features.length > 0 && openStep === 'identify';
 
   // ── Imperative feature outlines ──────────────────────────────────────────────
   // @react-google-maps doesn't reliably update or remove <Polygon>/<Polyline>
@@ -686,7 +751,7 @@ export default function DiyBoundaryPage() {
     // Front yards only: fire off the Street View pass now (boundary + house features are final and
     // just written to diyBoundaryFinal, which the service reads) so it runs alongside the reveal
     // animation. The service self-gates and never throws; we await it before navigating (below).
-    if (svPromiseRef.current === null && sc.yard_type === 'front') {
+    if (STREET_VIEW_ENABLED && svPromiseRef.current === null && sc.yard_type === 'front') {
       svPromiseRef.current = analyzeStreetView().catch(() => null);
     }
     // In-page reveal: draw the plan ALIGNED to the live satellite (to-scale at the user's zoom),
@@ -732,8 +797,11 @@ export default function DiyBoundaryPage() {
       let px: { x: number; y: number } | null = null;
       try { const p = projOverlayRef.current?.getProjection?.()?.fromLatLngToContainerPixel(new google.maps.LatLng(lat, lng)); if (p) px = { x: p.x, y: p.y }; } catch { /* ignore */ }
       setDoorPulse(px);
+      // Hold on the door step until the marker + both ping rings have fully played (the 2nd ring starts
+      // at 0.45s and finishes ~1.65s), then fade to the existing-features step — so the fade never cuts
+      // the animation off mid-pulse.
       if (doorTimer.current) window.clearTimeout(doorTimer.current);
-      doorTimer.current = window.setTimeout(() => { setDoorPulse(null); setOpenStep(prev => (prev === 'door' ? 'identify' : prev)); }, 1200);
+      doorTimer.current = window.setTimeout(() => { setDoorPulse(null); setOpenStep(prev => (prev === 'door' ? 'identify' : prev)); }, 1850);
       return;
     }
     if (openStep === 'identify') {
@@ -766,10 +834,10 @@ export default function DiyBoundaryPage() {
     const gen = ++detectGenRef.current;
     setDetecting(true);
     setFeatures([]); setReviewedIds([]); setActiveId(null);
-    // Pencil re-trace the boundary (the overlay draws on, then STAYS in place of the green polygon),
-    // THEN advance to the main-entry step. Detection runs in the background meanwhile.
+    // Pencil re-trace the boundary (the overlay draws on, then STAYS in place of the green polygon).
+    // Closing does NOT advance — the bottom-right button flips to "Continue" so the user advances
+    // explicitly (and can review/redraw first). Detection runs in the background meanwhile.
     setTraceOn(true);
-    revealTimers.current.push(window.setTimeout(() => setOpenStep('door'), 2200));
     detectSiteFeatures(snap)
       .then(detected => {
         if (detectGenRef.current !== gen) return;
@@ -899,7 +967,7 @@ export default function DiyBoundaryPage() {
   // for the address above the map instead of the "outline your boundary" prompt.
   const needAddress = openStep === 'boundary' && !hasAddress;
   return (
-    <div className="h-screen flex flex-col" style={{ backgroundColor: '#F4F0E6', overflow: 'hidden', paddingBottom: '4rem' }}>
+    <div className="h-screen flex flex-col" style={{ backgroundColor: PAGE_BG, overflow: 'hidden', paddingBottom: '4rem' }}>
 
       {/* Top bar — Logo left, stepper upper-right */}
       <div className="flex items-start justify-between px-10 flex-shrink-0" style={{ paddingTop: '2rem' }}>
@@ -910,7 +978,7 @@ export default function DiyBoundaryPage() {
 
       {/* Step instruction */}
       <h1 style={{ fontFamily: IS, fontSize: '4rem', color: '#2A2A26', lineHeight: 1.05, fontWeight: 400, marginTop: '1.33rem', marginBottom: '1.6rem', paddingLeft: '2.5rem' }}>
-        {needAddress ? 'Enter your home address to start designing' : STEP_INSTRUCTION[openStep ?? 'boundary']}
+        {needAddress ? 'Enter your home address to start designing' : stepInstruction(openStep ?? 'boundary', yardType)}
       </h1>
 
       {/* ── Subtitle (or address input) + map — centered column, fills remaining height ── */}
@@ -930,6 +998,16 @@ export default function DiyBoundaryPage() {
           )}
         </div>
         <div style={{ flex: 9, minHeight: 0, width: '100%', borderRadius: 20, overflow: 'hidden', position: 'relative' }}>
+        <style>{`@keyframes doorMark { 0% { transform: translate(-50%,-50%) scale(0); } 60% { transform: translate(-50%,-50%) scale(1.18); } 100% { transform: translate(-50%,-50%) scale(1); } }`}</style>
+        {/* Step-transition beat — briefly dims/blurs the map (~750ms) on each advance so the step change
+            is unmistakable, then clears to reveal the map already in the new mode. No card, just the wipe. */}
+        {transStep && (
+          <div style={{ position: 'absolute', inset: 0, zIndex: 60,
+            background: 'rgba(20,18,12,0.34)', backdropFilter: 'blur(3px)', WebkitBackdropFilter: 'blur(3px)',
+            pointerEvents: 'none', animation: 'bStepScrim 750ms ease both' }}>
+            <style>{`@keyframes bStepScrim { 0%{opacity:0} 18%{opacity:1} 74%{opacity:1} 100%{opacity:0} }`}</style>
+          </div>
+        )}
         <div ref={mapBoxRef} className="w-full h-full overflow-hidden relative" style={{ cursor: mapCursor }}>
           {/* The pencil boundary is rendered as a map overlay (see createPencilOverlay), so it stays
               anchored on pan/zoom — nothing to draw here. */}
@@ -937,18 +1015,29 @@ export default function DiyBoundaryPage() {
           {doorPulse && (
             <div className="absolute" style={{ inset: 0, zIndex: 11, pointerEvents: 'none' }}>
               <style>{`@keyframes doorPing { 0% { transform: scale(0.35); opacity: 0.75; } 100% { transform: scale(2.6); opacity: 0; } }`}</style>
-              <span style={{ position: 'absolute', left: doorPulse.x - 24, top: doorPulse.y - 24, width: 48, height: 48, borderRadius: '50%', border: '2.5px solid #FFFFFF', boxShadow: '0 0 0 1.5px rgba(42,42,38,0.35)', boxSizing: 'border-box', animation: 'doorPing 1.2s ease-out infinite' }} />
-              <span style={{ position: 'absolute', left: doorPulse.x - 24, top: doorPulse.y - 24, width: 48, height: 48, borderRadius: '50%', border: '2.5px solid #FFFFFF', boxSizing: 'border-box', animation: 'doorPing 1.2s ease-out 0.45s infinite' }} />
+              {/* Play the two rings ONCE (forwards → stay faded out at the end) so the animation has a
+                  defined finish; the advance below waits for it before fading to the next step. */}
+              <span style={{ position: 'absolute', left: doorPulse.x - 24, top: doorPulse.y - 24, width: 48, height: 48, borderRadius: '50%', border: '2.5px solid #FFFFFF', boxShadow: '0 0 0 1.5px rgba(42,42,38,0.35)', boxSizing: 'border-box', animation: 'doorPing 1.2s ease-out forwards' }} />
+              <span style={{ position: 'absolute', left: doorPulse.x - 24, top: doorPulse.y - 24, width: 48, height: 48, borderRadius: '50%', border: '2.5px solid #FFFFFF', boxSizing: 'border-box', animation: 'doorPing 1.2s ease-out 0.45s forwards' }} />
             </div>
           )}
-          {/* Redraw — top-left overlay (boundary step, once drawn). Hidden while drawing so it
-              doesn't collide with the Done button, which now sits in the same spot. */}
-          {openStep === 'boundary' && !drawing && (boundaryDone || vertices.length > 0) && (
-            <button onClick={resetBoundary}
-              className="absolute px-4 py-2 rounded-full hover:opacity-90 transition-all"
-              style={{ top: 14, left: 14, zIndex: 10, border: 'none', background: 'white', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, color: '#2A2A26', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.18)' }}>
-              Redraw
-            </button>
+          {/* Undo + Clear — top-left overlay while outlining the project area (replaces the old Redraw;
+              Clear = start over, same as Redraw). Undo removes the last placed point. */}
+          {openStep === 'boundary' && vertices.length > 0 && (
+            <div className="absolute flex gap-2" style={{ top: 14, left: 14, zIndex: 10 }}>
+              {drawing && (
+                <button onClick={() => setVertices(v => v.slice(0, -1))}
+                  className="px-4 py-2 rounded-full hover:opacity-90 transition-all"
+                  style={{ border: 'none', background: 'white', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, color: '#2A2A26', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.18)' }}>
+                  Undo
+                </button>
+              )}
+              <button onClick={resetBoundary}
+                className="px-4 py-2 rounded-full hover:opacity-90 transition-all"
+                style={{ border: 'none', background: 'white', fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, color: '#2A2A26', cursor: 'pointer', boxShadow: '0 2px 10px rgba(0,0,0,0.18)' }}>
+                Clear
+              </button>
+            </div>
           )}
           {/* Reveal: illustrated plan draws over the live map, then the map fades out beneath it. */}
           {reveal && (
@@ -1053,7 +1142,7 @@ export default function DiyBoundaryPage() {
               {doorPoint && (
                 <OverlayView position={{ lat: doorPoint[1], lng: doorPoint[0] }} mapPaneName={OverlayView.OVERLAY_LAYER}
                   getPixelPositionOffset={() => ({ x: 0, y: 0 })}>
-                  <div style={{ transform: 'translate(-50%, -50%)', width: 20, height: 20, borderRadius: '50%', background: '#F5C518', border: '2.5px solid white', boxShadow: '0 1px 5px rgba(0,0,0,0.35)' }} />
+                  <div style={{ transform: 'translate(-50%, -50%)', width: 20, height: 20, borderRadius: '50%', background: '#F5C518', border: '2.5px solid white', boxShadow: '0 1px 5px rgba(0,0,0,0.35)', animation: 'doorMark 0.38s cubic-bezier(0.34,1.56,0.64,1)' }} />
                 </OverlayView>
               )}
 
@@ -1104,15 +1193,6 @@ export default function DiyBoundaryPage() {
             <div style={{ width: '100%', height: '100%', background: '#2A2A26' }} />
           )}
 
-          {/* Done — closes the project area (top-left, where Redraw sits; shown while drawing with 3+ points) */}
-          {drawing && vertices.length >= 3 && (
-            <button onClick={handleBoundaryDone}
-              className="absolute flex items-center gap-2 px-5 py-2.5 rounded-full hover:opacity-90 transition-all"
-              style={{ top: 14, left: 14, zIndex: 10, background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, border: 'none', cursor: 'pointer', boxShadow: '0 4px 16px rgba(0,0,0,0.35)' }}>
-              Done
-            </button>
-          )}
-
           {/* Drawing instruction — shown at the top of the map while adding a feature */}
           {addMode !== null && ePolyStep !== 'attributes' && (
             <div className="absolute px-5 py-2.5 rounded-full"
@@ -1148,16 +1228,6 @@ export default function DiyBoundaryPage() {
             <div className="absolute"
               style={{ top: 14, left: 14, width: 307, maxWidth: 'calc(100% - 28px)', zIndex: 10, background: 'white', borderRadius: 16, padding: '14px 16px', boxShadow: '0 8px 30px rgba(0,0,0,0.18)', maxHeight: 'calc(100% - 28px)', overflowY: 'auto' }}>
 
-              {/* Header — back · title · count pill */}
-              <div className="flex items-center gap-3" style={{ marginBottom: 12 }}>
-                <button onClick={() => (reviewedIds.length > 0 ? reopenReview() : setOpenStep('door'))} title="Back"
-                  className="flex items-center justify-center rounded-full transition-all hover:opacity-80"
-                  style={{ flexShrink: 0, width: 40, height: 40, background: 'none', border: '1.5px solid rgba(42,42,38,0.16)', color: '#2A2A26', cursor: 'pointer', fontSize: '1.05rem', lineHeight: 1 }}>
-                  ←
-                </button>
-                <h2 style={{ fontFamily: IS, fontSize: '1.5rem', color: '#2A2A26', margin: 0, fontWeight: 400, lineHeight: 1.05, flex: 1, minWidth: 0 }}>Existing features</h2>
-                <span style={{ flexShrink: 0, fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, color: '#2F6B4F', background: '#E6EFDF', borderRadius: 999, padding: '5px 12px' }}>{detectedCount} found</span>
-              </div>
 
               {addPickerOpen || addMode !== null ? (
                 <div className="flex flex-col gap-3">
@@ -1244,28 +1314,58 @@ export default function DiyBoundaryPage() {
               ) : !allReviewed ? (
                 /* STATE A — one feature at a time (the active one). */
                 currentReview ? (
-                  <div className="flex items-center gap-3" style={{ padding: '4px 0' }}>
-                    <div style={{ width: 14, height: 14, borderRadius: 4, flexShrink: 0, background: FEATURE_COLOR[currentReview.type] ?? '#9A9A92' }} />
-                    <div className="flex flex-col" style={{ flex: 1, minWidth: 0 }}>
-                      <span style={{ fontFamily: IT, fontSize: '0.95rem', fontWeight: 600, color: '#2A2A26', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{toSentenceCase(currentReview.label || currentReview.type)}</span>
-                      <span style={{ fontFamily: IT, fontSize: '0.8rem', color: '#9A9A92' }}>{featureDetail(currentReview)}</span>
+                  (() => {
+                    const reviewIdx = liveFeatures.findIndex(f => f.id === currentReview.id);
+                    return (
+                  <div className="flex flex-col gap-2.5">
+                    {/* Top: small back · segmented progress · position count */}
+                    <div className="flex items-center gap-2.5">
+                      <button onClick={() => (reviewedIds.length > 0 ? reopenReview() : setOpenStep('door'))} title="Back"
+                        className="flex items-center justify-center rounded-full transition-all hover:opacity-80"
+                        style={{ flexShrink: 0, width: 30, height: 30, background: 'white', border: '1.5px solid rgba(42,42,38,0.16)', color: '#2A2A26', cursor: 'pointer', fontSize: '0.9rem', lineHeight: 1 }}>
+                        ←
+                      </button>
+                      <div className="flex items-center gap-1" style={{ flex: 1, minWidth: 0 }}>
+                        {liveFeatures.map((f, i) => (
+                          <div key={f.id} style={{ flex: 1, height: 4, borderRadius: 2, background: i <= reviewIdx ? '#2F6B4F' : '#D9D4CA' }} />
+                        ))}
+                      </div>
+                      <span style={{ flexShrink: 0, fontFamily: IT, fontSize: '0.8rem', fontWeight: 600, color: '#6A6A60' }}>{reviewIdx + 1}/{liveFeatures.length}</span>
                     </div>
-                    <button onClick={() => confirmFeature(currentReview.id)} title="Confirm"
-                      className="flex items-center justify-center rounded-full transition-all hover:opacity-90"
-                      style={{ flexShrink: 0, width: 30, height: 30, background: '#2F6B4F', color: 'white', border: 'none', cursor: 'pointer', fontSize: '0.85rem', lineHeight: 1 }}>
-                      ✓
-                    </button>
-                    <button onClick={() => { const live = liveFeatures; const idx = live.findIndex(f => f.id === currentReview.id); if (idx >= 0 && idx < live.length - 1) setActiveId(live[idx + 1].id); resolveFeature(currentReview.id, 'remove'); }} title="Remove"
-                      className="flex items-center justify-center rounded-full transition-all hover:opacity-90"
-                      style={{ flexShrink: 0, width: 30, height: 30, background: 'white', color: '#2A2A26', border: '1.5px solid rgba(42,42,38,0.16)', cursor: 'pointer', fontSize: '0.85rem', lineHeight: 1 }}>
-                      ✕
-                    </button>
+                    {/* Feature: dot · name + footprint · remove (✕) · confirm (✓) — compact */}
+                    <div className="flex items-center gap-3" style={{ padding: '2px 0' }}>
+                      <div style={{ flexShrink: 0, width: 14, height: 14, borderRadius: 4, background: FEATURE_COLOR[currentReview.type] ?? '#9A9A92' }} />
+                      <div className="flex flex-col" style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ fontFamily: IT, fontSize: '0.95rem', fontWeight: 600, color: '#2A2A26', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{toSentenceCase(currentReview.label || currentReview.type)}</span>
+                        <span style={{ fontFamily: IT, fontSize: '0.8rem', color: '#9A9A92' }}>{featureDetail(currentReview)}</span>
+                      </div>
+                      <button onClick={() => { const live = liveFeatures; const idx = live.findIndex(f => f.id === currentReview.id); if (idx >= 0 && idx < live.length - 1) setActiveId(live[idx + 1].id); resolveFeature(currentReview.id, 'remove'); }} title="Remove"
+                        className="flex items-center justify-center rounded-full transition-all hover:opacity-90"
+                        style={{ flexShrink: 0, width: 30, height: 30, background: 'white', color: '#2A2A26', border: '1.5px solid rgba(42,42,38,0.16)', cursor: 'pointer', fontSize: '0.85rem', lineHeight: 1 }}>
+                        ✕
+                      </button>
+                      <button onClick={() => confirmFeature(currentReview.id)} title="Confirm"
+                        className="flex items-center justify-center rounded-full transition-all hover:opacity-90"
+                        style={{ flexShrink: 0, width: 30, height: 30, background: '#2F6B4F', color: 'white', border: 'none', cursor: 'pointer', fontSize: '0.85rem', lineHeight: 1 }}>
+                        ✓
+                      </button>
+                    </div>
                   </div>
+                    );
+                  })()
                 ) : null
               ) : (
                 /* STATE B — all reviewed → add another feature. Pick a type first; only "Other" asks
                    for a name (in its attributes step), so there's no upfront label field here. */
-                <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-2.5">
+                  <div className="flex items-center justify-between">
+                    <button onClick={() => (reviewedIds.length > 0 ? reopenReview() : setOpenStep('door'))} title="Back"
+                      className="flex items-center justify-center rounded-full transition-all hover:opacity-80"
+                      style={{ flexShrink: 0, width: 30, height: 30, background: 'white', border: '1.5px solid rgba(42,42,38,0.16)', color: '#2A2A26', cursor: 'pointer', fontSize: '0.9rem', lineHeight: 1 }}>
+                      ←
+                    </button>
+                    <span style={{ fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, color: '#9A9A92' }}>{liveFeatures.length} of {liveFeatures.length}</span>
+                  </div>
                   <span style={{ fontFamily: IT, fontSize: '0.72rem', letterSpacing: '0.08em', color: '#9A9A92', fontWeight: 600, textTransform: 'uppercase' }}>Any other features?</span>
                   <button onClick={() => setAddPickerOpen(true)} title="Add feature"
                     className="flex items-center justify-center gap-2 transition-all hover:opacity-90"
@@ -1288,25 +1388,34 @@ export default function DiyBoundaryPage() {
         const order = visibleSteps;                                   // boundary → door → identify
         const i = Math.max(0, order.indexOf(openStep ?? 'boundary'));
         const last = i >= order.length - 1;                           // 'door' = last boundary step
-        const ready = openStep === 'boundary' ? boundaryDone : openStep === 'identify' ? true : openStep === 'door' ? doorPoint !== null : true;
+        // The identify step can't be left until every detected feature is reviewed (confirmed or removed).
+        const ready = openStep === 'boundary' ? boundaryDone : openStep === 'identify' ? allReviewed : openStep === 'door' ? doorPoint !== null : true;
         const busy = reveal !== null;                                  // reveal animation in progress
+        // Boundary step is a two-state button: while drawing it's "Done drawing" (disabled until the
+        // outline has 3+ points) and clicking it CLOSES the shape; once closed (or restored on re-entry)
+        // it flips to "Continue" which advances. Clear resets to the disabled "Done drawing" state.
+        const isBoundary = openStep === 'boundary';
+        const canAct = isBoundary ? (boundaryDone || (drawing && vertices.length >= 3)) : ready;
+        const boundaryLabel = boundaryDone ? 'Continue →' : 'Done drawing';
         return (
           <>
             <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-            <button disabled={busy} onClick={() => i > 0 ? setOpenStep(order[i - 1]) : navigate('/diy/preferences', { state: { step: 3 } })}
-              className="fixed bottom-8 left-10 transition-all hover:opacity-70 disabled:opacity-40"
-              style={{ fontFamily: IT, fontSize: '0.85rem', color: '#7A7A73', fontWeight: 500, background: 'none', border: 'none', cursor: busy ? 'default' : 'pointer' }}>
-              ← back
-            </button>
-            <button onClick={() => { if (busy) return; if (last) goToPlacement(); else if (ready) setOpenStep(order[i + 1]); }} disabled={!ready || busy}
+            <BackButton disabled={busy} onClick={() => i > 0 ? setOpenStep(order[i - 1]) : navigate('/diy/preferences', { state: { step: 3 } })}
+              className="fixed bottom-8 left-10" />
+            <button onClick={() => {
+                if (busy) return;
+                if (isBoundary) { if (boundaryDone) setOpenStep(order[i + 1]); else handleBoundaryDone(); return; }
+                if (last) goToPlacement(); else if (ready) setOpenStep(order[i + 1]);
+              }} disabled={!canAct || busy}
+              title={openStep === 'identify' && !allReviewed ? 'Review each existing feature to continue' : undefined}
               className="fixed bottom-8 right-10 flex items-center justify-center gap-2 px-7 py-3.5 rounded-full transition-all hover:opacity-90 disabled:opacity-60"
-              style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500, border: 'none', cursor: (ready && !busy) ? 'pointer' : 'default' }}>
+              style={{ background: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500, border: 'none', cursor: (canAct && !busy) ? 'pointer' : 'default' }}>
               {busy ? (
                 <>
                   <span style={{ width: 15, height: 15, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.4)', borderTopColor: 'white', animation: 'spin 0.8s linear infinite' }} />
                   Preparing your plan…
                 </>
-              ) : 'Continue →'}
+              ) : isBoundary ? boundaryLabel : 'Continue →'}
             </button>
           </>
         );

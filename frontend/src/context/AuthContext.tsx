@@ -2,6 +2,8 @@ import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
+import { clearAllDesignState } from '../services/designPayload';
+import { clearActiveIds } from '../services/activeDesign';
 
 interface AuthContextValue {
   session: Session | null;
@@ -54,6 +56,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { needsConfirmation: !data.session };
       },
       async signOut() {
+        // Clear local design state + active-id pointers FIRST so a shared browser
+        // never leaks one user's in-progress design to the next — even if the
+        // signOut network call below throws.
+        try {
+          clearAllDesignState();
+          clearActiveIds();
+        } catch { /* ignore — best effort */ }
         const { error } = await supabase.auth.signOut();
         if (error) throw error;
       },

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
+import BackButton from '../components/BackButton';
 import DiyPlanMap, { type PlantMarker } from '../components/DiyPlanMap';
 import {
   selectTrees, selectLayer, mapStyle, STYLE_TOTAL_SPECIES,
@@ -10,10 +11,10 @@ import {
 } from '../services/plantSelectionService';
 import { fetchHardinessZone } from '../features/sun/hardinessZone';
 
+import { IS, IT } from '../lib/theme';
+
 const BG = '#E7E1D5'; // matches the placement page background
 const DARK = '#2A2A26';
-const IS = "'Instrument Serif', serif";
-const IT = "'Inter Tight', sans-serif";
 
 // Distribute `total` species across [tree, large_shrub, shrub, groundcover], at least one
 // each, weighted toward the matrix layers so variety lives in shrubs/groundcover, not structure.
@@ -74,7 +75,7 @@ function Card({ kind, seed, name, size, onSwap, onRemove }: { kind: 'trees' | 'l
         <div style={{ fontFamily: IT, fontSize: '0.92rem', fontWeight: 600, color: DARK }}>{name}</div>
         <div style={{ fontFamily: IT, fontSize: '0.8rem', color: '#9A9A8E', marginBottom: 10 }}>{size}</div>
         {onSwap && (
-          <button onClick={onSwap} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, color: '#3d5c3a', background: 'rgba(61,92,58,0.08)', border: '1.5px solid rgba(61,92,58,0.25)', borderRadius: 999, padding: '7px 0', cursor: 'pointer' }}>↻ Swap species</button>
+          <button onClick={onSwap} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontFamily: IT, fontSize: '0.8rem', fontWeight: 500, color: '#3d5c3a', background: 'rgba(61,92,58,0.08)', border: '1.5px solid rgba(61,92,58,0.25)', borderRadius: 999, padding: '7px 0', cursor: 'pointer' }}>Swap species</button>
         )}
       </div>
     </div>
@@ -121,7 +122,7 @@ export default function DiyPlantsPage() {
         const plan = JSON.parse(localStorage.getItem('diyPlacementPlan') || '{}');
         const ps = prefs.style || '';
         const [ts, ls, ms, gc] = await Promise.all([
-          selectTrees({ prefsStyle: ps, boundary: saved.boundary || [], existing: saved.confirmedFeatures || [], projectAreaFt: plan.projectAreaFt, zone, coverageGoal: shade ? SHADE_CANOPY_COVERAGE_GOAL : TREE_CANOPY_COVERAGE_GOAL }),
+          selectTrees({ prefsStyle: ps, boundary: saved.boundary || [], existing: saved.confirmedFeatures || [], projectAreaFt: plan.projectAreaFt, zone, coverageGoal: shade ? SHADE_CANOPY_COVERAGE_GOAL : TREE_CANOPY_COVERAGE_GOAL, yardType: sc.yard_type ?? prefs.yard_type }),
           selectLayer('large_shrub', { prefsStyle: ps, zone }),
           selectLayer('shrub', { prefsStyle: ps, zone }),
           selectLayer('groundcover', { prefsStyle: ps, zone }),
@@ -434,11 +435,8 @@ export default function DiyPlantsPage() {
       </div>
 
       {/* Fixed nav — matches the placement / boundary pages */}
-      <button onClick={() => navigate('/diy/review')}
-        className="fixed bottom-8 left-10 transition-all hover:opacity-70"
-        style={{ color: '#7A7A73', fontFamily: IT, fontSize: '0.85rem', fontWeight: 500, background: 'none', border: 'none', cursor: 'pointer' }}>
-        ← back
-      </button>
+      <BackButton onClick={() => navigate('/diy/review')}
+        className="fixed bottom-8 left-10" />
       <div className="fixed bottom-8 right-10 flex items-center gap-3">
         <button onClick={() => navigate('/diy/yard-3d')}
           className="flex items-center gap-2 px-6 py-3.5 rounded-full transition-all hover:opacity-80"

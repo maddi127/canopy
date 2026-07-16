@@ -8,11 +8,11 @@ import { executeStage1 } from '../services/stage1ExecutionService';
 import type { S1Plan, S1Bed, S1Object } from '../types/stage1Plan';
 import type { ConfirmedFeature } from './DiyFeatureConfirmPage';
 import type { SunCell } from '../services/sunModelingService';
+import { IT, PAGE_BG } from '../lib/theme';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const GOOGLE_MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY || '';
-const IT = "'Inter Tight', sans-serif";
 
 const GROUND_FILL: Record<string, { color: string; opacity: number }> = {
   lawn:                { color: '#5A9E62', opacity: 0.28 },
@@ -315,7 +315,7 @@ export default function DiyPlanRevealPage() {
 
   if (loadPhase === 'error') {
     return (
-      <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#efe9db', gap: 16 }}>
+      <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: PAGE_BG, gap: 16 }}>
         <p style={{ fontFamily: IT, fontSize: '1rem', color: '#2A2A26', margin: 0 }}>We couldn't generate a plan for this yard.</p>
         <button onClick={() => navigate('/diy/preferences')} style={BTN_PRIMARY}>Start over</button>
       </div>

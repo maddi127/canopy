@@ -4,11 +4,12 @@
 import * as turf from '@turf/turf';
 import {
   selectTrees, selectLayer, mapStyle, STYLE_TOTAL_SPECIES, LAYER_SPECIES_TARGET,
-  placePlan, isUnderPlanting, plantSunCats, densityParams,
+  placePlan, plantSunCats, densityParams, plantableStats,
   plantCapacity, cloneCapacity, pocketFits, consumePocket,
   TREE_CANOPY_COVERAGE_GOAL, SHADE_CANOPY_COVERAGE_GOAL,
   type Layer, type SpeciesCandidate, type SunCat, type PlantCapacity,
 } from './plantSelectionService';
+import { buildPlantSlots, type PlantSlot } from './plantSlots';
 import { fetchHardinessZone } from '../features/sun/hardinessZone';
 import { sampleSun, type SunMap } from './sunAnalysis';
 import { buildCS, type DraftPlan, type Ring } from './draftPlan';
@@ -127,27 +128,11 @@ export async function buildDraftPlants(plan: DraftPlan): Promise<DraftPlantResul
     return v >= 0.72 ? 'full' : v >= 0.45 ? 'part' : 'shade';
   };
 
-  // Open planting ground (boundary − structures − placed features − paths) in feet.
-  let ground: any = null;
-  try {
-    ground = turf.polygon([closeR(plan.boundary)]);
-    const cut = (r: Ring) => { try { const d = turf.difference(ground, turf.polygon([closeR(r)])); if (d) ground = d; } catch { /* keep */ } };
-    for (const f of existing) if (f.keep && f.type !== 'tree' && (f.vertices?.length ?? 0) >= 3) cut(f.vertices.map(v => cs.toXY(v[0], v[1])) as Ring);
-    for (const z of plan.zones) if (z.ring?.length >= 3) cut(z.ring);
-  } catch { ground = null; }
-  // Planar (feet²) area of the remaining ground — turf.area assumes lng/lat, so compute directly.
-  const planarArea = (g: any): number => {
-    if (!g) return 0;
-    const polys = g.geometry.type === 'Polygon' ? [g.geometry.coordinates] : g.geometry.coordinates;
-    let sum = 0;
-    for (const poly of polys) {
-      const outer = poly[0]; let a = 0;
-      for (let i = 0; i < outer.length - 1; i++) a += outer[i][0] * outer[i + 1][1] - outer[i + 1][0] * outer[i][1];
-      sum += Math.abs(a / 2);
-    }
-    return sum;
-  };
-  const openGround = planarArea(ground);
+  // Plantable ground + sun-region shares, from the SAME rule placePlan uses (shared plantableStats) — so
+  // this preview and the editor measure the yard identically. Replaces the old bespoke turf area + raw
+  // sun-grid sampling, which diverged from the editor and made the two show different plant counts/mixes.
+  const stats = plantableStats({ boundary, existing, plan: { zones: plan.zones, beds: plan.beds, paths: plan.paths }, sunAt: sunMap ? sunCatAt : undefined });
+  const openGround = stats.plantableFt;
 
   // Capacity-first: measure the open pockets (per sun region + 'any' union) BEFORE selecting, so a
   // structural species that provably can't fit anywhere is never picked. Uses the same plantable
@@ -164,27 +149,17 @@ export async function buildDraftPlants(plan: DraftPlan): Promise<DraftPlantResul
   let zone: number | undefined;
   if (typeof sc.lat === 'number' && typeof sc.lng === 'number') { try { zone = (await fetchHardinessZone(sc.lat, sc.lng))?.zone_number; } catch { /* none */ } }
   const [ts, ls, ms, gc] = await Promise.all([
-    selectTrees({ prefsStyle: prefs.style || '', boundary, existing, projectAreaFt: undefined, zone, coverageGoal: shade ? SHADE_CANOPY_COVERAGE_GOAL : TREE_CANOPY_COVERAGE_GOAL, capacity }),
+    selectTrees({ prefsStyle: prefs.style || '', boundary, existing, projectAreaFt: (plan as any).projectAreaFt, zone, coverageGoal: shade ? SHADE_CANOPY_COVERAGE_GOAL : TREE_CANOPY_COVERAGE_GOAL, capacity, yardType: prefs.yard_type }),
     selectLayer('large_shrub', { prefsStyle: prefs.style || '', zone }),
     selectLayer('shrub', { prefsStyle: prefs.style || '', zone }),
     selectLayer('groundcover', { prefsStyle: prefs.style || '', zone }),
   ]);
 
-  // Sun categories present in the yard (sampled over the sun grid inside the boundary) AND their
-  // area fractions. FIX A needs the fractions as WEIGHTS (they were previously discarded after the
-  // ≥8% present-filter), so the dominant sun region gets a proportional share of the species budget.
-  const { presentCats, catAreaPct } = ((): { presentCats: SunCat[]; catAreaPct: Record<SunCat, number> | null } => {
-    if (!sunMap) return { presentCats: ['full', 'part'], catAreaPct: null };
-    const cnt: Record<SunCat, number> = { full: 0, part: 0, shade: 0 };
-    let tot = 0;
-    for (let r = 0; r < sunMap.rows; r++) for (let c = 0; c < sunMap.cols; c++) {
-      const v = sunMap.score[r * sunMap.cols + c]; if (v < 0) continue;
-      cnt[v >= 0.72 ? 'full' : v >= 0.45 ? 'part' : 'shade']++; tot++;
-    }
-    if (!tot) return { presentCats: ['full', 'part'], catAreaPct: null };
-    const pct: Record<SunCat, number> = { full: cnt.full / tot, part: cnt.part / tot, shade: cnt.shade / tot };
-    return { presentCats: SUN_CATS.filter(cat => pct[cat] >= 0.08), catAreaPct: pct };
-  })();
+  // Sun-region area shares over the PLANTABLE ground (from plantableStats above — same rule the editor
+  // uses), as WEIGHTS so the dominant region gets a proportional share of the species budget. presentCats
+  // = regions holding ≥8% of the plantable ground (mirrors the editor's ≥0.08 filter).
+  const catAreaPct = stats.sunShares;
+  const presentCats: SunCat[] = catAreaPct ? SUN_CATS.filter(cat => catAreaPct[cat] >= 0.08) : ['full', 'part'];
 
   // Explicit per-layer species targets (user-tuned: foundation carries the variety — the old
   // percentage split gave it only ~4 species). Mirrors the editor exactly.
@@ -253,82 +228,19 @@ export async function buildDraftPlants(plan: DraftPlan): Promise<DraftPlantResul
     groundcover: seedPicks(gc.candidates, Math.min(gc.candidates.length, shares[3]), false),
   };
 
-  // Instances: trees + large shrubs capped at 1/500 sf; shrubs/groundcover fill ground shares.
-  const canopyR = (c: SpeciesCandidate) => Math.max(0.4, c.matureWidthFt / 2);
-  const DRIFT: Record<string, number> = { shrub: 5, groundcover: 10 };
-  const GROUND_SHARE: Record<string, number> = { shrub: 0.44, groundcover: 0.56 };
-  // Density from prefs (the editor's slider persists here; default balanced) → coverage + packing.
+  // Instance building lives in the SHARED buildPlantSlots (services/plantSlots.ts) so THIS preview and the
+  // editor's plants step produce the identical plan (drift counts, ground shares, decoupled structural
+  // budgets, focal clumping all match). `density` is read here for its packing factor (used by place()
+  // below); buildPlantSlots takes the coverage half. buildSlots stays a thin wrapper so the select-then-
+  // place loop can re-slot after each structural substitution.
   const density = densityParams(Number(prefs.plantDensity) || 1);
-  type Slot = { id: string; layer: Layer; r: number; name: string; type: string; under: boolean; drift: string; tall: boolean; sun?: SunCat[] };
-  const visualCap = Math.max(0, Math.floor(openGround / 500));
-
-  // Slot generation for a given pick set — pure (no side effects), so the select-then-place loop can
-  // rebuild it after each structural substitution. Trees + large shrubs are single/few individuals
-  // capped at 1/500 sf; shrubs/groundcover fill ground shares as drifts.
-  const buildSlots = (pk: Record<Layer, SpeciesCandidate[]>): Slot[] => {
-    const slots: Slot[] = [];
-    const treeN = Math.min(Math.max(ts.targetToPlant, pk.tree.length ? 1 : 0), visualCap);
-    for (let i = 0; i < treeN && pk.tree.length; i++) {
-      const sp = pk.tree[i % pk.tree.length];
-      slots.push({ id: `tree-${i}`, layer: 'tree', r: canopyR(sp), name: sp.common_name || sp.botanical_name, type: sp.type, under: isUnderPlanting(sp), drift: `tree-${i}`, tall: false });
-    }
-    const largeN = Math.max(0, visualCap - treeN);
-    if (pk.large_shrub.length && largeN > 0) {
-      // FIX A consistency: distribute large shrubs across sun regions BY AREA (mirrors
-      // DiyPlacementPage, which already does this — this twin previously used a flat round-robin that
-      // under-represented the dominant region), cycling species within each region for variety.
-      const catList: SunCat[] = [];
-      if (catAreaPct) {
-        // FIX 1 (mirrors DiyPlacementPage): largest-remainder split of the large-shrub budget across
-        // present sun regions — never Math.round-to-zero — so every present category keeps ≥1 slot
-        // when largeN allows. Previously a minority region could round to 0 and a species whose only
-        // compatible region was that one got zero placement attempts.
-        const quota = allocateProportional(largeN, presentCats.map(cat => Math.max(0, catAreaPct[cat])));
-        presentCats.forEach((cat, i) => { for (let k = 0; k < quota[i]; k++) catList.push(cat); });
-      }
-      while (catList.length < largeN) catList.push(presentCats[catList.length % presentCats.length]);
-      catList.length = largeN;
-      const idx: Record<string, number> = {};
-      catList.forEach((cat, li) => {
-        const pool = pk.large_shrub.filter(sp => plantSunCats(sp.sun_requirement).includes(cat));
-        const use = pool.length ? pool : pk.large_shrub;
-        const j = idx[cat] ?? 0; idx[cat] = j + 1;
-        const sp = use[j % use.length];
-        slots.push({ id: `large-${cat}-${li}-0`, layer: 'large_shrub', r: canopyR(sp), name: sp.common_name || sp.botanical_name, type: sp.type, under: isUnderPlanting(sp), drift: `large-${cat}-${li}`, tall: sp.matureHeightFt >= 4, sun: pool.length ? [cat] : undefined });
-      });
-    }
-    // Density as a PER-SPECIES count scale (mirrors the editor): each sun-bucket's full-density
-    // drift budget splits equally among its species (equal split IS the anti-monoculture rule),
-    // then each species' share scales by densityFrac flooring at 1 — every species appears at
-    // every density. Clump SIZE also thins (members scale ~0.45→1.0) so sparse reads open.
-    let d = 0;
-    const densityFrac = density.coverage; // 0.30 (sparse) … 1.0 (lush)
-    const memberCount = (driftN: number) => Math.max(2, Math.round(driftN * (0.45 + 0.55 * densityFrac)));
-    for (const layer of (['shrub', 'groundcover'] as Layer[])) {
-      if (!pk[layer].length || openGround <= 0) continue;
-      const driftN = DRIFT[layer];
-      for (const cat of presentCats) {
-        const catSpecies = pk[layer].filter(sp => plantSunCats(sp.sun_requirement).includes(cat));
-        if (!catSpecies.length) continue;
-        const bucketAreaFull = openGround * GROUND_SHARE[layer] / presentCats.length; // full density
-        if (bucketAreaFull <= 0) continue;
-        const avgR = catSpecies.reduce((s, sp) => s + canopyR(sp), 0) / catSpecies.length;
-        const fullDrifts = Math.max(catSpecies.length, Math.round(bucketAreaFull / (driftN * Math.PI * avgR * avgR)));
-        const baseN = Math.floor(fullDrifts / catSpecies.length), extraN = fullDrifts % catSpecies.length;
-        const mN = memberCount(driftN);
-        catSpecies.forEach((sp, i) => {
-          const speciesDrifts = Math.max(1, Math.round((baseN + (i < extraN ? 1 : 0)) * densityFrac));
-          const r = canopyR(sp), name = sp.common_name || sp.botanical_name;
-          for (let n = 0; n < speciesDrifts && slots.length < 360; n++) {
-            const key = `${layer}-${cat}-${d}`;
-            for (let k = 0; k < mN; k++) slots.push({ id: `${key}-${k}`, layer, r, name, type: sp.type, under: isUnderPlanting(sp), drift: key, tall: sp.matureHeightFt >= 4, sun: [cat] });
-            d++;
-          }
-        });
-      }
-    }
-    return slots;
-  };
+  const buildSlots = (pk: Record<Layer, SpeciesCandidate[]>): PlantSlot[] => buildPlantSlots({
+    picks: pk,
+    treeTargetToPlant: ts.targetToPlant,
+    plantableFt: openGround,
+    catAreaPct,
+    densityCoverage: density.coverage,
+  });
 
   // HARD RULE: a plant's full mature footprint must never overlap a feature. placePlan already
   // avoids these, but this is the authoritative guard — it also catches zones that reached the engine
@@ -341,7 +253,7 @@ export async function buildDraftPlants(plan: DraftPlan): Promise<DraftPlantResul
 
   // Deterministic placement (same engine as the studio's plants step).
   const focalSlots = Array.isArray((plan as any).focalSlots) ? (plan as any).focalSlots : undefined;
-  const place = (slots: Slot[]): Record<string, { x: number; y: number }> => placePlan({
+  const place = (slots: PlantSlot[]): Record<string, { x: number; y: number }> => placePlan({
     boundary, existing,
     plan: { zones: plan.zones, beds: plan.beds, paths: plan.paths },
     instances: slots.map(s => ({ id: s.id, layer: s.layer, r: s.r, under: s.under, drift: s.drift, tall: s.tall, sun: s.sun, name: s.name, type: s.type })),
@@ -361,7 +273,7 @@ export async function buildDraftPlants(plan: DraftPlan): Promise<DraftPlantResul
   const tried = new Set<number>(); // candidate ids already tried & failed
   let slots = buildSlots(picks);
   let positions = place(slots);
-  const isPlaced = (s: Slot): boolean => { const p = positions[s.id]; return !!p && clearOf(p.x, p.y, s.r); };
+  const isPlaced = (s: PlantSlot): boolean => { const p = positions[s.id]; return !!p && clearOf(p.x, p.y, s.r); };
   for (let iter = 0; iter < MAX_SUBST_ITERS; iter++) {
     let changed = false;
     for (const layer of (['tree', 'large_shrub'] as ('tree' | 'large_shrub')[])) {
@@ -409,6 +321,12 @@ export async function buildDraftPlants(plan: DraftPlan): Promise<DraftPlantResul
     instances.push({ x: p.x, y: p.y, name: s.name, layer: s.layer, widthFt: sp ? sp.matureWidthFt : s.r * 2, heightFt: sp ? sp.matureHeightFt : 4, type: sp ? sp.type : '', evergreen: sp ? ev(sp.is_evergreen) : false, color: colorOf.get(s.name)! });
   }
   try { localStorage.setItem('diyPlantInstances', JSON.stringify(instances)); } catch { /* quota */ }
+  // Persist the SPECIES PICKS (not just render positions) tagged with the current plan signature, so the
+  // edit page hydrates THIS exact plan instead of re-selecting its own — the two screens then match.
+  try {
+    localStorage.setItem('diyPlantPicks', JSON.stringify(picks));
+    localStorage.setItem('diyPlantPicksSig', localStorage.getItem('diyPlacementPlanSig') || '');
+  } catch { /* quota */ }
 
   const counts = new Map<string, { name: string; layer: Layer; count: number; color: string; sizeLabel: string }>();
   for (const inst of instances) {

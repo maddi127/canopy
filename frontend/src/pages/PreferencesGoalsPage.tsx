@@ -3,15 +3,14 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { Leaf, Star, Flower2, Heart, Droplets, Shield, TreePine, Armchair, UtensilsCrossed, Flame, Waves, Sprout, Package, Upload, X } from 'lucide-react';
 import Logo from '../components/Logo';
 import AppStepper from '../components/AppStepper';
+import BackButton from '../components/BackButton';
+import { IS, IT, INK, PAGE_BG } from '../lib/theme';
 
 type Step = 1 | 2 | 3 | 4; // 1 yard · 2 style · 3 features · 4 photo (goals + lawn questions removed for now)
 
-const IT = "'Inter Tight', sans-serif";
-const IS = "'Instrument Serif', serif";
-
 const YARD_TYPES = [
   { id: 'front', label: 'Front yard', description: 'The welcoming first impression' },
-  { id: 'back',  label: 'Back yard',  description: 'Your private retreat' },
+  { id: 'back',  label: 'Backyard',  description: 'Your private retreat' },
 ];
 
 const STYLE_OPTIONS = [
@@ -132,6 +131,10 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto, journeyTotal
     else navigate('/');
   };
 
+  // Leave the features step (photo step next, or straight to finish when photos are skipped). An optional
+  // override lets "None of these" persist an empty selection without waiting for the async state update.
+  const advanceFromFeatures = (featuresOverride?: string[]) => { if (skipPhoto) handleFinish(featuresOverride); else setStep(4); };
+
   const handleYardType = (type: string) => {
     setYardType(type);
     setTimeout(() => setStep(2), 520);
@@ -152,15 +155,18 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto, journeyTotal
     reader.readAsDataURL(file);
   };
 
-  const handleFinish = () => {
+  const handleFinish = (featuresOverride?: string[]) => {
     const validIds = new Set(ALL_FEATURES.filter(f => yardType !== 'front' || !f.backOnly).map(f => f.id));
+    // "None of these" passes [] explicitly: setSelectedFeatures is async, so a synchronous handleFinish
+    // right after it would otherwise persist the stale (pre-clear) selection.
+    const features = featuresOverride ?? selectedFeatures;
     // Goals + lawn questions are gone for now — carry any previously saved values, else defaults.
     const goals: string[] = Array.isArray(saved.goal_priority) ? saved.goal_priority : [];
     localStorage.setItem('userPreferences', JSON.stringify({
       style,
       goal_priority:  goals,
       not_important:  ALL_GOALS.filter(g => !goals.includes(g.id)).map(g => g.id),
-      space_usage:    selectedFeatures.filter(id => validIds.has(id)),
+      space_usage:    features.filter(id => validIds.has(id)),
       lawnTarget:     defaultLawnTarget(style, yardType),
     }));
     const existing = (() => { try { return JSON.parse(localStorage.getItem('siteContext') || '{}'); } catch { return {}; } })();
@@ -175,7 +181,7 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto, journeyTotal
   const visibleFeatures = ALL_FEATURES.filter(f => yardType !== 'front' || !f.backOnly);
 
   return (
-    <div className="min-h-screen flex flex-col pt-8 pb-24 relative" style={{ backgroundColor: '#efe9db' }}>
+    <div className="min-h-screen flex flex-col pt-8 pb-24 relative" style={{ backgroundColor: PAGE_BG }}>
 
       {/* Header */}
       <div className="flex items-start justify-between px-10 flex-shrink-0">
@@ -201,7 +207,7 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto, journeyTotal
                 style={{
                   backgroundColor: selected ? '#C8DFC8' : '#F4EAD2',
                   height: '460px',
-                  border: '2px solid #1A1A16',
+                  border: `2px solid ${INK}`,
                 }}
               >
                 {/* Title + subtitle */}
@@ -236,7 +242,7 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto, journeyTotal
                 className="flex-1 rounded-3xl overflow-hidden focus:outline-none transition-all duration-300 hover:-translate-y-1 active:translate-y-0 flex flex-col"
                 style={{
                   height: '420px',
-                  border: selected ? '2px solid #1A1A16' : '1.5px solid rgba(26,26,22,0.18)',
+                  border: selected ? `2px solid ${INK}` : '1.5px solid rgba(26,26,22,0.18)',
                 }}
               >
                 {/* Photo area */}
@@ -278,7 +284,7 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto, journeyTotal
                     width: 'calc(33.33% - 11px)',
                     height: '150px',
                     backgroundColor: selected ? '#C8DFC8' : '#F4EAD2',
-                    border: selected ? '2px solid #1A1A16' : '1.5px solid rgba(26,26,22,0.18)',
+                    border: selected ? `2px solid ${INK}` : '1.5px solid rgba(26,26,22,0.18)',
                     transition: 'background-color 0.3s ease, transform 0.2s ease',
                   }}
                 >
@@ -289,6 +295,13 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto, journeyTotal
                 </button>
               );
             })}
+          </div>
+          <div className="flex justify-center" style={{ marginTop: '28px' }}>
+            <button onClick={() => { setSelectedFeatures([]); advanceFromFeatures([]); }}
+              className="transition-all hover:opacity-70"
+              style={{ fontFamily: IT, fontSize: '0.9rem', color: '#7A7A73', fontWeight: 500, textDecoration: 'underline', textUnderlineOffset: '3px' }}>
+              None of these
+            </button>
           </div>
         </div>
       )}
@@ -335,32 +348,31 @@ export default function PreferencesGoalsPage({ nextPath, skipPhoto, journeyTotal
 
       {/* Back — fixed bottom-left, hidden on step 1 */}
       {step > 1 && (
-        <button
-          onClick={goBack}
-          className="fixed bottom-8 left-10 transition-all hover:opacity-70"
-          style={{ fontFamily: IT, fontSize: '0.85rem', color: '#7A7A73', fontWeight: 500 }}
-        >
-          ← back
-        </button>
+        <BackButton onClick={goBack} className="fixed bottom-8 left-10" />
       )}
 
-      {/* Continue — fixed bottom-right, features + photo steps */}
+      {/* Continue — fixed bottom-right. Step 3 shows the dark Continue pill ONLY when features are
+          selected; the "None of these" link below the options handles the empty path (and auto-advances).
+          Step 4 keeps its Continue / skip-photo pair. */}
       {(step === 3 || step === 4) && (() => {
-        const advance = () => { if (step === 3) { if (skipPhoto) handleFinish(); else setStep(4); } else handleFinish(); };
         const hasSelection = step === 3 ? selectedFeatures.length > 0 : photo !== null;
-        const primaryLabel = step === 4 ? 'Generate concepts →' : 'Continue →';
-        const skipLabel    = step === 4 ? 'Skip, generate without photo →' : 'None of these →';
-        return hasSelection ? (
-          <button onClick={advance}
-            className="fixed bottom-8 right-10 flex items-center gap-2.5 px-7 py-3.5 rounded-full transition-all hover:opacity-90"
-            style={{ backgroundColor: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500 }}>
-            {primaryLabel}
-          </button>
-        ) : (
-          <button onClick={() => { if (step === 3) setSelectedFeatures([]); advance(); }}
+        if (step === 3 && !hasSelection) return null;
+        if (hasSelection) {
+          const advance = () => { if (step === 3) advanceFromFeatures(); else handleFinish(); };
+          return (
+            <button onClick={advance}
+              className="fixed bottom-8 right-10 flex items-center gap-2.5 px-7 py-3.5 rounded-full transition-all hover:opacity-90"
+              style={{ backgroundColor: '#2A2A26', color: '#efe9db', fontFamily: IT, fontSize: '0.9rem', fontWeight: 500 }}>
+              {step === 4 ? 'Generate concepts →' : 'Continue →'}
+            </button>
+          );
+        }
+        // step 4, no photo
+        return (
+          <button onClick={handleFinish}
             className="fixed bottom-8 right-10 transition-all hover:opacity-70"
             style={{ color: '#A8A8A0', fontFamily: IT, fontSize: '0.85rem' }}>
-            {skipLabel}
+            Skip, generate without photo →
           </button>
         );
       })()}
